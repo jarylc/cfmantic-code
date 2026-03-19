@@ -176,15 +176,12 @@ func (h *Handler) HandleIndex(ctx context.Context, req mcp.CallToolRequest) (*mc
 
 		releaseSem = false
 
-		var (
-			indexCtx    context.Context
-			finishIndex func()
-		)
+		indexParent := ctx
 		if async {
-			indexCtx, finishIndex = h.startManualIndex(context.WithoutCancel(ctx), path)
-		} else {
-			indexCtx, finishIndex = h.startManualIndex(ctx, path)
+			indexParent = context.WithoutCancel(ctx)
 		}
+
+		indexCtx, finishIndex := h.startManualIndex(indexParent, path)
 
 		if async {
 			go h.incrementalIndex(indexCtx, path, ignorePatterns, tracker, finishIndex)

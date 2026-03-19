@@ -85,6 +85,30 @@ func TestFullRunParams_WalkFilesUsesProvidedContext(t *testing.T) {
 	assert.Nil(t, files)
 }
 
+func TestStartManualIndex_DetachedParentPreservesValues(t *testing.T) {
+	mc := mocks.NewMockVectorClient(t)
+	sm := mocks.NewMockStatusManager(t)
+	sp := mocks.NewMockSplitter(t)
+	h := newTestHandler(t, mc, sm, sp, nil)
+
+	type ctxKey struct{}
+
+	path := t.TempDir()
+	parent, parentCancel := context.WithCancel(context.WithValue(context.Background(), ctxKey{}, "request-only"))
+	indexCtx, cleanup := h.startManualIndex(context.WithoutCancel(parent), path)
+	t.Cleanup(cleanup)
+
+	parentCancel()
+
+	assert.Equal(t, "request-only", indexCtx.Value(ctxKey{}))
+
+	select {
+	case <-indexCtx.Done():
+		t.Fatal("manual index context should not inherit parent cancellation")
+	default:
+	}
+}
+
 func TestHandlerProcessFilesFlushesTrackerProgress(t *testing.T) {
 	mc := mocks.NewMockVectorClient(t)
 	sm := snapshot.NewManager()

@@ -69,16 +69,16 @@ Config file: `~/.codeium/windsurf/mcp_config.json`
 
 ```json
 {
-   "mcpServers": {
-      "cfmantic-code": {
-         "command": "<path-to-cfmantic-code>",
-         "env": {
-            "WORKER_URL": "https://cfmantic-code.<your-subdomain>.workers.dev",
-            "AUTH_TOKEN": "<your-token>",
-            "DESKTOP_NOTIFICATIONS": "true"
-         }
+  "mcpServers": {
+    "cfmantic-code": {
+      "command": "<path-to-cfmantic-code>",
+      "env": {
+        "WORKER_URL": "https://cfmantic-code.<your-subdomain>.workers.dev",
+        "AUTH_TOKEN": "<your-token>",
+        "DESKTOP_NOTIFICATIONS": "true"
       }
-   }
+    }
+  }
 }
 ```
 

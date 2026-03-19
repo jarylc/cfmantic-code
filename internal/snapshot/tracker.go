@@ -194,14 +194,6 @@ func (t *Tracker) timeNow() time.Time {
 	return time.Now()
 }
 
-func (t *Tracker) newProgressTimer(delay time.Duration, fn func()) progressTimer {
-	if t.newTimer != nil {
-		return t.newTimer(delay, fn)
-	}
-
-	return time.AfterFunc(delay, fn)
-}
-
 func (t *Tracker) startOperation() {
 	t.startOnce.Do(func() {
 		if starter, ok := t.status.(OperationStarter); ok {
@@ -239,7 +231,14 @@ func (t *Tracker) recordProgressLocked(progress Progress, now time.Time) {
 	t.progressTimerSeq++
 	seq := t.progressTimerSeq
 
-	t.progressTimer = t.newProgressTimer(delay, func() {
+	timerFactory := t.newTimer
+	if timerFactory == nil {
+		timerFactory = func(delay time.Duration, fn func()) progressTimer {
+			return time.AfterFunc(delay, fn)
+		}
+	}
+
+	t.progressTimer = timerFactory(delay, func() {
 		t.flushPendingProgress(seq)
 	})
 }
