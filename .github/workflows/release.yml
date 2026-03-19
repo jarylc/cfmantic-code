@@ -1,0 +1,162 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  checks:
+    uses: ./.github/workflows/checks.yml
+
+  config-check:
+    needs: checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Check GoReleaser config
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          args: check -f .goreleaser.yaml
+
+  build:
+    needs:
+      - checks
+      - config-check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            runs_on: ubuntu-24.04
+            goos: linux
+            goarch: amd64
+            cc: cc
+          - os: ubuntu-latest
+            runs_on: ubuntu-24.04-arm
+            goos: linux
+            goarch: arm64
+            cc: cc
+          - os: windows-latest
+            runs_on: windows-2025
+            goos: windows
+            goarch: amd64
+            cc: gcc
+          - os: macos-15-intel
+            runs_on: macos-15-intel
+            goos: darwin
+            goarch: amd64
+            cc: cc
+          - os: macos-14
+            runs_on: macos-14
+            goos: darwin
+            goarch: arm64
+            cc: cc
+    runs-on: ${{ matrix.runs_on }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Set up MSYS2 toolchain
+        if: matrix.os == 'windows-latest'
+        uses: msys2/setup-msys2@v2
+        with:
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+
+      - name: Build native binary
+        uses: goreleaser/goreleaser-action@v7
+        env:
+          CGO_ENABLED: 1
+          CC: ${{ matrix.cc }}
+        with:
+          args: build --clean --single-target --id cfmantic-code -f .goreleaser.yaml
+
+      - name: Package artifact
+        id: package
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          package_path="$(python - <<'PY'
+          import os
+          from pathlib import Path
+          import tarfile
+          import zipfile
+
+          dist = Path('dist')
+          binary = next(
+              p for p in dist.rglob('cfmantic-code*')
+              if p.is_file() and p.name in {'cfmantic-code', 'cfmantic-code.exe'}
+          )
+          goos = os.environ['GOOS']
+          goarch = os.environ['GOARCH']
+
+          if os.environ['RUNNER_OS'] == 'Windows':
+              package = dist / f'cfmantic-code-{goos}-{goarch}.zip'
+              with zipfile.ZipFile(package, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+                  zf.write(binary, arcname=binary.name)
+          else:
+              package = dist / f'cfmantic-code-{goos}-{goarch}.tar.gz'
+              with tarfile.open(package, 'w:gz') as tf:
+                  tf.add(binary, arcname=binary.name)
+
+          print(package.as_posix())
+          PY
+          )"
+          echo "package_path=$package_path" >> "$GITHUB_OUTPUT"
+
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: cfmantic-code-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: ${{ steps.package.outputs.package_path }}
+          if-no-files-found: error
+
+  release:
+    needs:
+      - checks
+      - build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Compute checksums
+        run: |
+          shopt -s nullglob
+          packages=(dist/*.tar.gz dist/*.zip)
+          sha256sum "${packages[@]}" > dist/checksums.txt
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          shopt -s nullglob
+          packages=(dist/*.tar.gz dist/*.zip)
+          gh release create "$TAG" "${packages[@]}" dist/checksums.txt --title "$TAG" --generate-notes

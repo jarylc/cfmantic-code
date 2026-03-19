@@ -1,0 +1,37 @@
+version: 2
+project_name: cfmantic-code
+
+builds:
+  - id: cfmantic-code
+    main: .
+    binary: cfmantic-code
+    env:
+      - CGO_ENABLED=1
+    ldflags:
+      - -s -w -X cfmantic-code/internal/config.buildVersion={{ .Version }}
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: cfmantic-code
+    ids:
+      - cfmantic-code
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    wrap_in_directory: false
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  disable: true

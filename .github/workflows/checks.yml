@@ -1,0 +1,33 @@
+name: checks
+
+on:
+  workflow_call:
+  push:
+    branches:
+      - "**"
+  pull_request:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Run pre-commit checks
+        run: make pre-commit
+
+      - name: Verify checkout is clean
+        shell: bash
+        run: |
+          git diff --exit-code
+          if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
+            git status --short --untracked-files=all
+            exit 1
+          fi

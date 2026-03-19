@@ -1,0 +1,32 @@
+# Binaries
+cfmantic-code
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test
+*.test
+*.out
+coverage.html
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Debug
+__debug_bin*
+
+# Builds
+bin/
+dist/
+
+# Mocks
+internal/mocks/
