@@ -51,7 +51,8 @@ Config file: `~/.opencode/config.json` or `opencode.json`
 {
    "mcp": {
       "cfmantic-code": {
-         "command": "<path-to-cfmantic-code>",
+         "type": "local",
+         "command": ["<path-to-cfmantic-code>"],
          "env": {
             "WORKER_URL": "https://cfmantic-code.<your-subdomain>.workers.dev",
             "AUTH_TOKEN": "<your-token>",
