@@ -79,7 +79,7 @@ func Load() (*Config, error) {
 		embeddingDimension = n
 	}
 
-	chunkSize := 8000
+	chunkSize := 4000
 
 	if v := os.Getenv("CHUNK_SIZE"); v != "" {
 		n, err := strconv.Atoi(v)
@@ -94,7 +94,7 @@ func Load() (*Config, error) {
 		chunkSize = n
 	}
 
-	chunkOverlap := 400
+	chunkOverlap := 200
 
 	if v := os.Getenv("CHUNK_OVERLAP"); v != "" {
 		n, err := strconv.Atoi(v)

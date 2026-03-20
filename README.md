@@ -70,16 +70,16 @@ Config file: `~/.codeium/windsurf/mcp_config.json`
 
 ```json
 {
-  "mcpServers": {
-    "cfmantic-code": {
-      "command": "<path-to-cfmantic-code>",
-      "env": {
-        "WORKER_URL": "https://cfmantic-code.<your-subdomain>.workers.dev",
-        "AUTH_TOKEN": "<your-token>",
-        "DESKTOP_NOTIFICATIONS": "true"
+   "mcpServers": {
+      "cfmantic-code": {
+         "command": "<path-to-cfmantic-code>",
+         "env": {
+            "WORKER_URL": "https://cfmantic-code.<your-subdomain>.workers.dev",
+            "AUTH_TOKEN": "<your-token>",
+            "DESKTOP_NOTIFICATIONS": "true"
+         }
       }
-    }
-  }
+   }
 }
 ```
 
@@ -120,8 +120,8 @@ Common optional variables:
 Advanced optional variables:
 
 - `EMBEDDING_DIMENSION`: embedding size, must be positive, default `1024`
-- `CHUNK_SIZE`: chunk size, must be positive, default `8000`
-- `CHUNK_OVERLAP`: chunk overlap, must be `>= 0` and `< CHUNK_SIZE`, default `400`
+- `CHUNK_SIZE`: chunk size, must be positive, default `4000`
+- `CHUNK_OVERLAP`: chunk overlap, must be `>= 0` and `< CHUNK_SIZE`, default `200`
 - `INDEX_CONCURRENCY`: indexing worker count, default is your CPU count / 2
 - `INSERT_BATCH_SIZE`: entities per insert request, default `192`
 - `INSERT_CONCURRENCY`: concurrent insert requests, default `4`

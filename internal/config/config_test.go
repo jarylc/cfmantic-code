@@ -155,8 +155,8 @@ func TestLoad_Defaults(t *testing.T) {
 	wantIndexConcurrency := defaultIndexConcurrency(runtime.NumCPU())
 
 	assert.Equal(t, 1024, cfg.EmbeddingDimension, "default EMBEDDING_DIMENSION")
-	assert.Equal(t, 8000, cfg.ChunkSize, "default CHUNK_SIZE")
-	assert.Equal(t, 400, cfg.ChunkOverlap, "default CHUNK_OVERLAP")
+	assert.Equal(t, 4000, cfg.ChunkSize, "default CHUNK_SIZE")
+	assert.Equal(t, 200, cfg.ChunkOverlap, "default CHUNK_OVERLAP")
 	assert.Equal(t, "cfmantic-code", cfg.ServerName, "fixed server name")
 	assert.Equal(t, "2.3.4", cfg.ServerVersion, "server version comes from buildVersion")
 	assert.Equal(t, "ast", cfg.SplitterType, "default SPLITTER_TYPE")

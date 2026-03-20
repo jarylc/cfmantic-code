@@ -370,10 +370,6 @@ func TestRun_StopBeforeFileDoneResultReturnsInsertError(t *testing.T) {
 
 	files := []walker.CodeFile{
 		makeFile(t, dir, "first.go", "first\n"),
-		makeFile(t, dir, "second.go", "second\n"),
-		makeFile(t, dir, "third.go", "third\n"),
-		makeFile(t, dir, "fourth.go", "fourth\n"),
-		makeFile(t, dir, "fifth.go", "fifth\n"),
 	}
 	cfg := pipeline.Config{
 		Concurrency:     1,
@@ -389,6 +385,65 @@ func TestRun_StopBeforeFileDoneResultReturnsInsertError(t *testing.T) {
 	assert.Equal(t, 1, result.TotalChunks)
 	assert.Equal(t, 1, result.ChunkCounts["first.go"])
 	assert.Empty(t, result.CompletedFiles)
+}
+
+func TestRun_StopBeforeFileDoneResultKeepsConcurrentLaterFilesIncomplete(t *testing.T) {
+	dir := t.TempDir()
+	mc := newMockVectorClient(t)
+	sp := newMockSplitter(t)
+
+	insertCtxDone := make(chan (<-chan struct{}), 1)
+
+	sp.On("Split", testifymock.Anything, "first.go", testifymock.Anything).
+		Run(func(args testifymock.Arguments) {
+			emit, ok := args.Get(2).(splitter.EmitChunkFunc)
+			require.True(t, ok)
+			require.NoError(t, emit(splitter.Chunk{Content: "first", StartLine: 1, EndLine: 1}))
+
+			ctxDone := <-insertCtxDone
+			<-ctxDone
+		}).
+		Return(nil).
+		Once()
+
+	sp.On("Split", testifymock.Anything, "second.go", testifymock.Anything).
+		Run(func(args testifymock.Arguments) {
+			emit, ok := args.Get(2).(splitter.EmitChunkFunc)
+			require.True(t, ok)
+			require.NoError(t, emit(splitter.Chunk{Content: "second", StartLine: 1, EndLine: 1}))
+		}).
+		Return(nil).
+		Maybe()
+
+	mc.On("Insert", testifymock.Anything, "col", testifymock.Anything).
+		Run(func(args testifymock.Arguments) {
+			ctx, ok := args.Get(0).(context.Context)
+			require.True(t, ok)
+
+			insertCtxDone <- ctx.Done()
+		}).
+		Return(nil, errors.New("quota exceeded")).
+		Once()
+
+	files := []walker.CodeFile{
+		makeFile(t, dir, "first.go", "first\n"),
+		makeFile(t, dir, "second.go", "second\n"),
+	}
+	cfg := pipeline.Config{
+		Concurrency:       2,
+		InsertConcurrency: 1,
+		InsertBatchSize:   1,
+		Collection:        "col",
+		CodebasePath:      dir,
+	}
+
+	result, err := pipeline.Run(context.Background(), &cfg, files, sp, mc)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "quota exceeded")
+	assert.Equal(t, 1, result.ChunkCounts["first.go"])
+	assert.Empty(t, result.CompletedFiles)
+	assert.NotContains(t, result.CompletedFiles, "second.go")
 }
 
 // ─── Run: empty files list ────────────────────────────────────────────────────
