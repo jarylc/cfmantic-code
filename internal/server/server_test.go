@@ -70,7 +70,7 @@ func TestNew_PathPropertiesDescribeStableScopeConstraints(t *testing.T) {
 			property: "path",
 			required: true,
 			typeName: "string",
-			contains: []string{"codebase root", "ignore-file handling", "status tracking"},
+			contains: []string{"working directory", "ignore-file handling", "status tracking"},
 		},
 		{
 			tool:     "search_code",
@@ -113,7 +113,7 @@ func TestNew_InstructionsExplainIndexCodebaseTimeoutBehavior(t *testing.T) {
 	instructions := serverInstructionText(t, s)
 	for _, fragment := range []string{
 		"index_codebase",
-		"project root",
+		"working directory",
 		"async=false",
 		"background",
 		"client timeouts",

@@ -422,8 +422,7 @@ func TestHandleIndex_SemaphoreBlocks(t *testing.T) {
 		"path": dir,
 	}))
 	require.NoError(t, err)
-	assert.False(t, res.IsError, "expected non-error result")
-	assert.Contains(t, resultText(t, res), "already in progress")
+	requireErrorResult(t, res, "already in progress")
 
 	// Drain the semaphore so cleanup does not block.
 	<-h.indexSem
@@ -803,6 +802,39 @@ func TestHandleIndex_FailedAncestorFromSnapshotAfterRestart_ReturnsMachineFriend
 	)
 
 	mc.AssertNotCalled(t, "CreateCollection", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+}
+
+func TestHandleIndex_CwdInsideManagedRoot_AncestorTargetReturnsMachineFriendlyError(t *testing.T) {
+	mc := mocks.NewMockVectorClient(t)
+	sp := mocks.NewMockSplitter(t)
+	cfg := loadTestConfig(t)
+
+	outer := t.TempDir()
+	managedRoot := filepath.Join(outer, "managed")
+	cwd := filepath.Join(managedRoot, "nested")
+	require.NoError(t, os.MkdirAll(cwd, 0o755))
+
+	persistedSnapshot := snapshot.NewManager()
+	persistedSnapshot.SetIndexed(managedRoot, 2, 4)
+
+	t.Chdir(cwd)
+
+	h := New(mc, snapshot.NewManager(), cfg, sp, nil)
+
+	res, err := h.HandleIndex(context.Background(), makeReq(map[string]any{
+		"path":  filepath.Join("..", ".."),
+		"async": true,
+	}))
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	assert.True(t, res.IsError)
+	assert.Equal(t,
+		fmt.Sprintf("cannot index parent path %q: managed root %q is already tracked", outer, managedRoot),
+		resultText(t, res),
+	)
+
+	mc.AssertNotCalled(t, "CreateCollection", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+	mc.AssertNotCalled(t, "DropCollection", mock.Anything, mock.Anything)
 }
 
 func TestHandleIndex_MoveRenameDetectedAtPath_ClearsStaleIndexAndStartsFresh(t *testing.T) {
@@ -2881,9 +2913,7 @@ func TestHandleStatus_Failed(t *testing.T) {
 		"path": dir,
 	}))
 	require.NoError(t, err)
-	assert.False(t, res.IsError)
-	text := resultText(t, res)
-	assert.Contains(t, text, "Indexing failed: connection error")
+	requireErrorResult(t, res, "Indexing failed: connection error")
 }
 
 func TestHandleStatus_FailedRetryable(t *testing.T) {
@@ -2903,10 +2933,8 @@ func TestHandleStatus_FailedRetryable(t *testing.T) {
 		"path": dir,
 	}))
 	require.NoError(t, err)
-	assert.False(t, res.IsError)
-	text := resultText(t, res)
-	assert.Contains(t, text, "Indexing failed")
-	assert.Contains(t, text, "Run index_codebase (without reindex) to continue where indexing left off")
+	requireErrorResult(t, res, "Indexing failed")
+	assert.Contains(t, resultText(t, res), "Run index_codebase (without reindex) to continue where indexing left off")
 }
 
 func TestHandleStatus_UnknownStatus(t *testing.T) {
@@ -2925,8 +2953,7 @@ func TestHandleStatus_UnknownStatus(t *testing.T) {
 		"path": dir,
 	}))
 	require.NoError(t, err)
-	assert.False(t, res.IsError)
-	assert.Contains(t, resultText(t, res), "Unknown status")
+	requireErrorResult(t, res, "Unknown status")
 }
 
 // ─── HandleClear ─────────────────────────────────────────────────────────────

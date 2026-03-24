@@ -303,250 +303,250 @@ func TestHandleIndex_FreshIndex_WithSyncMgr(t *testing.T) {
 Symbol: TestHandleIndex_AlreadyIndexed_NoReindex_NoChanges_DefaultAsyncStartsInBackground (function, lines 1090-1122)
 ```go
 func TestHandleIndex_Reindex_FailedStatusClearsRemoteIndex(t *testing.T) {
-	mc := mocks.NewMockVectorClient(t)
-	sm := mocks.NewMockStatusManager(t)
-	sp := mocks.NewMockSplitter(t)
-	h := newTestHandler(t, mc, sm, sp, nil)
+mc := mocks.NewMockVectorClient(t)
+sm := mocks.NewMockStatusManager(t)
+sp := mocks.NewMockSplitter(t)
+h := newTestHandler(t, mc, sm, sp, nil)
 
-	dir := t.TempDir()
-	collection := snapshot.CollectionName(dir)
+dir := t.TempDir()
+collection := snapshot.CollectionName(dir)
 
-	sm.On("IsIndexing", dir).Return(false)
-	sm.On("GetStatus", dir).Return(snapshot.StatusFailed)
-	mc.On("DropCollection", mock.Anything, collection).Return(nil)
-	sm.On("Remove", dir).Return()
-	mc.On("CreateCollection", mock.Anything, collection, h.cfg.EmbeddingDimension, true).Return(nil)
-	sm.On("SetStep", dir, "Starting").Return()
-	sm.On("SetStep", dir, "Walking files").Return()
-	sm.On("SetStep", dir, "Indexing 0 files").Return()
+sm.On("IsIndexing", dir).Return(false)
+sm.On("GetStatus", dir).Return(snapshot.StatusFailed)
+mc.On("DropCollection", mock.Anything, collection).Return(nil)
+sm.On("Remove", dir).Return()
+mc.On("CreateCollection", mock.Anything, collection, h.cfg.EmbeddingDimension, true).Return(nil)
+sm.On("SetStep", dir, "Starting").Return()
+sm.On("SetStep", dir, "Walking files").Return()
+sm.On("SetStep", dir, "Indexing 0 files").Return()
 
-	done := make(chan struct{})
+done := make(chan struct{})
 
-	sm.On("SetIndexed", dir, 0, 0).Run(func(args mock.Arguments) { close(done) }).Return()
+sm.On("SetIndexed", dir, 0, 0).Run(func(args mock.Arguments) { close(done) }).Return()
 
-	res, err := h.HandleIndex(context.Background(), makeReq(map[string]any{
-		"path":    dir,
-		"reindex": true,
-		"async":   true,
-	}))
-	require.NoError(t, err)
-	assert.False(t, res.IsError)
-	assert.Contains(t, resultText(t, res), "Indexing started")
+res, err := h.HandleIndex(context.Background(), makeReq(map[string]any{
+"path":    dir,
+"reindex": true,
+"async":   true,
+}))
+require.NoError(t, err)
+assert.False(t, res.IsError)
+assert.Contains(t, resultText(t, res), "Indexing started")
 
-	waitForDone(t, done, 5*time.Second)
+waitForDone(t, done, 5*time.Second)
 
-	lockPath := snapshot.LockFilePath(dir)
+lockPath := snapshot.LockFilePath(dir)
 
-	require.Eventually(t, func() bool {
-		_, statErr := os.Stat(lockPath)
-		return os.IsNotExist(statErr)
-	}, 5*time.Second, 5*time.Millisecond, "background goroutine did not exit in time")
+require.Eventually(t, func() bool {
+_, statErr := os.Stat(lockPath)
+return os.IsNotExist(statErr)
+}, 5*time.Second, 5*time.Millisecond, "background goroutine did not exit in time")
 }
 
 func TestHandleIndex_AlreadyIndexed_NoReindex_MissingRemoteCollection(t *testing.T) {
-	mc := mocks.NewMockVectorClient(t)
-	sm := mocks.NewMockStatusManager(t)
-	sp := mocks.NewMockSplitter(t)
-	h := newTestHandler(t, mc, sm, sp, nil)
+mc := mocks.NewMockVectorClient(t)
+sm := mocks.NewMockStatusManager(t)
+sp := mocks.NewMockSplitter(t)
+h := newTestHandler(t, mc, sm, sp, nil)
 
-	dir := t.TempDir()
-	collection := snapshot.CollectionName(dir)
+dir := t.TempDir()
+collection := snapshot.CollectionName(dir)
 
-	sm.On("IsIndexing", dir).Return(false)
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
-	mc.On("HasCollection", mock.Anything, collection).Return(false, nil)
+sm.On("IsIndexing", dir).Return(false)
+sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+mc.On("HasCollection", mock.Anything, collection).Return(false, nil)
 
-	res, err := h.HandleIndex(context.Background(), makeReq(map[string]any{
-		"path":  dir,
-		"async": true,
-	}))
-	require.NoError(t, err)
-	assert.True(t, res.IsError)
-	text := resultText(t, res)
-	assert.Contains(t, text, "remote index is missing")
-	assertAskUserBeforeReindexMessage(t, text)
-	assert.Contains(t, text, dir)
+res, err := h.HandleIndex(context.Background(), makeReq(map[string]any{
+"path":  dir,
+"async": true,
+}))
+require.NoError(t, err)
+assert.True(t, res.IsError)
+text := resultText(t, res)
+assert.Contains(t, text, "remote index is missing")
+assertAskUserBeforeReindexMessage(t, text)
+assert.Contains(t, text, dir)
 
-	select {
-	case h.indexSem <- struct{}{}:
-		<-h.indexSem
-	default:
-		t.Fatal("index semaphore leaked after missing remote collection")
-	}
+select {
+case h.indexSem <- struct{}{}:
+<-h.indexSem
+default:
+t.Fatal("index semaphore leaked after missing remote collection")
+}
 }
 
 func TestHandleIndex_AlreadyIndexed_NoReindex_NoChanges_ExplicitSyncReturnsCompletion(t *testing.T) {
-	mc := mocks.NewMockVectorClient(t)
-	sp := mocks.NewMockSplitter(t)
-	sm := snapshot.NewManager()
-	cfg := loadTestConfig(t)
-	h := New(mc, sm, cfg, sp, nil)
+mc := mocks.NewMockVectorClient(t)
+sp := mocks.NewMockSplitter(t)
+sm := snapshot.NewManager()
+cfg := loadTestConfig(t)
+h := New(mc, sm, cfg, sp, nil)
 
-	dir := t.TempDir()
-	sm.SetIndexed(dir, 10, 50)
-	expectRemoteCollectionExists(mc, dir)
+dir := t.TempDir()
+sm.SetIndexed(dir, 10, 50)
+expectRemoteCollectionExists(mc, dir)
 
-	res, err := h.HandleIndex(context.Background(), makeReq(map[string]any{
-		"path":  dir,
-		"async": false,
-	}))
-	require.NoError(t, err)
-	assert.False(t, res.IsError)
-	assert.Contains(t, resultText(t, res), "Incremental sync complete")
-	assert.NotContains(t, resultText(t, res), "Incremental sync started")
+res, err := h.HandleIndex(context.Background(), makeReq(map[string]any{
+"path":  dir,
+"async": false,
+}))
+require.NoError(t, err)
+assert.False(t, res.IsError)
+assert.Contains(t, resultText(t, res), "Incremental sync complete")
+assert.NotContains(t, resultText(t, res), "Incremental sync started")
 
-	info := sm.GetInfo(dir)
-	require.NotNil(t, info)
-	assert.Equal(t, snapshot.StatusIndexed, info.Status)
-	assert.Equal(t, 10, info.IndexedFiles)
-	assert.Equal(t, 50, info.TotalChunks)
-	assert.Empty(t, info.ErrorMessage)
+info := sm.GetInfo(dir)
+require.NotNil(t, info)
+assert.Equal(t, snapshot.StatusIndexed, info.Status)
+assert.Equal(t, 10, info.IndexedFiles)
+assert.Equal(t, 50, info.TotalChunks)
+assert.Empty(t, info.ErrorMessage)
 
-	requireIndexSemaphoreReleased(t, h)
-	requireNoIndexLock(t, dir)
+requireIndexSemaphoreReleased(t, h)
+requireNoIndexLock(t, dir)
 }
 
 func TestHandleIndex_AlreadyIndexed_NoReindex_NoChanges_DefaultAsyncStartsInBackground(t *testing.T) {
-	mc := mocks.NewMockVectorClient(t)
-	sm := mocks.NewMockStatusManager(t)
-	sp := mocks.NewMockSplitter(t)
-	h := newTestHandler(t, mc, sm, sp, nil)
+mc := mocks.NewMockVectorClient(t)
+sm := mocks.NewMockStatusManager(t)
+sp := mocks.NewMockSplitter(t)
+h := newTestHandler(t, mc, sm, sp, nil)
 
-	dir := t.TempDir()
+dir := t.TempDir()
 
-	sm.On("IsIndexing", dir).Return(false)
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
-	expectRemoteCollectionExists(mc, dir)
-	// Handler sets step before launching goroutine
-	sm.On("SetStep", dir, "Starting incremental sync").Return()
-	// incrementalIndex goroutine on empty dir with no stored hashes → no changes
-	sm.On("SetStep", dir, "Walking files").Return()
-	sm.On("SetStep", dir, "Computing file changes").Return()
-	// No changes: GetInfo then SetIndexed
-	existingInfo := &snapshot.CodebaseInfo{IndexedFiles: 10, TotalChunks: 50, Status: snapshot.StatusIndexed}
+sm.On("IsIndexing", dir).Return(false)
+sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+expectRemoteCollectionExists(mc, dir)
+// Handler sets step before launching goroutine
+sm.On("SetStep", dir, "Starting incremental sync").Return()
+// incrementalIndex goroutine on empty dir with no stored hashes → no changes
+sm.On("SetStep", dir, "Walking files").Return()
+sm.On("SetStep", dir, "Computing file changes").Return()
+// No changes: GetInfo then SetIndexed
+existingInfo := &snapshot.CodebaseInfo{IndexedFiles: 10, TotalChunks: 50, Status: snapshot.StatusIndexed}
 
-	done := make(chan struct{})
+done := make(chan struct{})
 
-	sm.On("GetInfo", dir).Return(existingInfo)
-	sm.On("SetIndexed", dir, 10, 50).Run(func(args mock.Arguments) { close(done) }).Return()
+sm.On("GetInfo", dir).Return(existingInfo)
+sm.On("SetIndexed", dir, 10, 50).Run(func(args mock.Arguments) { close(done) }).Return()
 
-	res, err := h.HandleIndex(context.Background(), makeReq(map[string]any{
-		"path": dir,
-	}))
-	require.NoError(t, err)
-	assert.False(t, res.IsError)
-	assert.Contains(t, resultText(t, res), "Incremental sync started")
+res, err := h.HandleIndex(context.Background(), makeReq(map[string]any{
+"path": dir,
+}))
+require.NoError(t, err)
+assert.False(t, res.IsError)
+assert.Contains(t, resultText(t, res), "Incremental sync started")
 
-	waitForDone(t, done, 5*time.Second)
+waitForDone(t, done, 5*time.Second)
 }
 
 func TestHandleIndex_AlreadyIndexed_NoReindex_AsyncIgnoresRequestCancellation(t *testing.T) {
-	mc := mocks.NewMockVectorClient(t)
-	sp := mocks.NewMockSplitter(t)
-	sm := mocks.NewMockStatusManager(t)
-	cfg := loadTestConfig(t)
-	h := New(mc, sm, cfg, sp, nil)
+mc := mocks.NewMockVectorClient(t)
+sp := mocks.NewMockSplitter(t)
+sm := mocks.NewMockStatusManager(t)
+cfg := loadTestConfig(t)
+h := New(mc, sm, cfg, sp, nil)
 
-	dir := t.TempDir()
-	collection := snapshot.CollectionName(dir)
-	goFile := filepath.Join(dir, "main.go")
-	require.NoError(t, os.WriteFile(goFile, []byte("package main\n"), 0o644))
+dir := t.TempDir()
+collection := snapshot.CollectionName(dir)
+goFile := filepath.Join(dir, "main.go")
+require.NoError(t, os.WriteFile(goFile, []byte("package main\n"), 0o644))
 
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
+ctx, cancel := context.WithCancel(context.Background())
+t.Cleanup(cancel)
 
-	sm.On("IsIndexing", dir).Return(false)
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
-	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{IndexedFiles: 5, TotalChunks: 20, Status: snapshot.StatusIndexed})
-	expectRemoteCollectionExists(mc, dir)
-	sm.On("SetStep", dir, "Starting incremental sync").Return()
-	sm.On("SetStep", dir, "Walking files").Return()
-	sm.On("SetStep", dir, "Computing file changes").Return()
-	sm.On("SetStep", dir, "Removing stale chunks").Return()
-	sm.On("SetStep", dir, "Indexing 1 changed files").Return()
-	sm.On("SetStep", dir, "Finalizing incremental sync").Return()
-	sm.On("SetProgress", mock.Anything, mock.Anything).Maybe()
+sm.On("IsIndexing", dir).Return(false)
+sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{IndexedFiles: 5, TotalChunks: 20, Status: snapshot.StatusIndexed})
+expectRemoteCollectionExists(mc, dir)
+sm.On("SetStep", dir, "Starting incremental sync").Return()
+sm.On("SetStep", dir, "Walking files").Return()
+sm.On("SetStep", dir, "Computing file changes").Return()
+sm.On("SetStep", dir, "Removing stale chunks").Return()
+sm.On("SetStep", dir, "Indexing 1 changed files").Return()
+sm.On("SetStep", dir, "Finalizing incremental sync").Return()
+sm.On("SetProgress", mock.Anything, mock.Anything).Maybe()
 
-	expectSplitChunks(t, sp, "main.go", []splitter.Chunk{{Content: "package main", StartLine: 1, EndLine: 1}})
+expectSplitChunks(t, sp, "main.go", []splitter.Chunk{{Content: "package main", StartLine: 1, EndLine: 1}})
 
-	insertStarted := make(chan struct{})
-	insertMayFinish := make(chan struct{})
-	insertCanceled := make(chan struct{})
+insertStarted := make(chan struct{})
+insertMayFinish := make(chan struct{})
+insertCanceled := make(chan struct{})
 
-	mc.On("Insert", mock.Anything, collection, singleFileInsert("main.go")).Run(func(args mock.Arguments) {
-		ctx, ok := args.Get(0).(context.Context)
-		require.True(t, ok)
+mc.On("Insert", mock.Anything, collection, singleFileInsert("main.go")).Run(func(args mock.Arguments) {
+ctx, ok := args.Get(0).(context.Context)
+require.True(t, ok)
 
-		close(insertStarted)
+close(insertStarted)
 
-		select {
-		case <-ctx.Done():
-			close(insertCanceled)
-		case <-insertMayFinish:
-		}
-	}).Return(&milvus.InsertResult{InsertCount: 1}, nil).Once()
+select {
+case <-ctx.Done():
+close(insertCanceled)
+case <-insertMayFinish:
+}
+}).Return(&milvus.InsertResult{InsertCount: 1}, nil).Once()
 
-	done := make(chan struct{})
+done := make(chan struct{})
 
-	sm.On("SetIndexed", dir, 1, 21).Run(func(args mock.Arguments) { close(done) }).Return()
+sm.On("SetIndexed", dir, 1, 21).Run(func(args mock.Arguments) { close(done) }).Return()
 
-	res, err := h.HandleIndex(ctx, makeReq(map[string]any{
-		"path": dir,
-	}))
-	require.NoError(t, err)
-	assert.False(t, res.IsError)
-	assert.Contains(t, resultText(t, res), "Incremental sync started")
+res, err := h.HandleIndex(ctx, makeReq(map[string]any{
+"path": dir,
+}))
+require.NoError(t, err)
+assert.False(t, res.IsError)
+assert.Contains(t, resultText(t, res), "Incremental sync started")
 
-	waitForDone(t, insertStarted, 5*time.Second)
-	cancel()
+waitForDone(t, insertStarted, 5*time.Second)
+cancel()
 
-	select {
-	case <-insertCanceled:
-		t.Fatal("async incremental indexing inherited request cancellation")
-	case <-time.After(100 * time.Millisecond):
-	}
+select {
+case <-insertCanceled:
+t.Fatal("async incremental indexing inherited request cancellation")
+case <-time.After(100 * time.Millisecond):
+}
 
-	close(insertMayFinish)
-	waitForDone(t, done, 5*time.Second)
+close(insertMayFinish)
+waitForDone(t, done, 5*time.Second)
 
-	require.Eventually(t, func() bool {
-		_, err := os.Stat(snapshot.LockFilePath(dir))
-		return os.IsNotExist(err)
-	}, 5*time.Second, 5*time.Millisecond)
+require.Eventually(t, func() bool {
+_, err := os.Stat(snapshot.LockFilePath(dir))
+return os.IsNotExist(err)
+}, 5*time.Second, 5*time.Millisecond)
 
-	requireIndexSemaphoreReleased(t, h)
-	requireNoIndexLock(t, dir)
+requireIndexSemaphoreReleased(t, h)
+requireNoIndexLock(t, dir)
 }
 
 func TestHandleIndex_AlreadyIndexed_NoReindex_ExplicitSyncReturnsErrorOnFailure(t *testing.T) {
-	mc := mocks.NewMockVectorClient(t)
-	sp := mocks.NewMockSplitter(t)
-	sm := snapshot.NewManager()
-	cfg := loadTestConfig(t)
-	h := New(mc, sm, cfg, sp, nil)
+mc := mocks.NewMockVectorClient(t)
+sp := mocks.NewMockSplitter(t)
+sm := snapshot.NewManager()
+cfg := loadTestConfig(t)
+h := New(mc, sm, cfg, sp, nil)
 
-	dir := t.TempDir()
-	sm.SetFailed(dir, "previous failure")
-	expectRemoteCollectionExists(mc, dir)
+dir := t.TempDir()
+sm.SetFailed(dir, "previous failure")
+expectRemoteCollectionExists(mc, dir)
 
-	hashFilePath := filesync.HashFilePath(dir)
-	require.NoError(t, os.MkdirAll(hashFilePath, 0o755))
+hashFilePath := filesync.HashFilePath(dir)
+require.NoError(t, os.MkdirAll(hashFilePath, 0o755))
 
-	res, err := h.HandleIndex(context.Background(), makeReq(map[string]any{
-		"path":  dir,
-		"async": false,
-	}))
-	require.NoError(t, err)
-	requireErrorResult(t, res, "computing file hashes")
-	assert.Contains(t, resultText(t, res), "is a directory")
+res, err := h.HandleIndex(context.Background(), makeReq(map[string]any{
+"path":  dir,
+"async": false,
+}))
+require.NoError(t, err)
+requireErrorResult(t, res, "computing file hashes")
+assert.Contains(t, resultText(t, res), "is a directory")
 
-	info := sm.GetInfo(dir)
-	require.NotNil(t, info)
-	assert.Equal(t, snapshot.StatusFailed, info.Status)
-	assert.Contains(t, info.ErrorMessage, "computing file hashes")
+info := sm.GetInfo(dir)
+require.NotNil(t, info)
+assert.Equal(t, snapshot.StatusFailed, info.Status)
+assert.Contains(t, info.ErrorMessage, "computing file hashes")
 
-	requireIndexSemaphoreReleased(t, h)
-	requireNoIndexLock(t, dir)
+requireIndexSemaphoreReleased(t, h)
+requireNoIndexLock(t, dir)
 }
 
 
@@ -808,7 +808,7 @@ import (
 )
 
 const (
-	serverInstructions    = "Semantic code search for local codebases. First call index_codebase on a project root. Initial indexing and reindexing always start in the background. If async=false is sent for those runs, it is ignored because they may exceed MCP client timeouts; use get_indexing_status for progress. Incremental refreshes can still use async=false to wait for completion. Then call search_code on that indexed root or one of its subdirectories. Use clear_index to remove stored index data."
+	serverInstructions    = "Semantic code search for local codebases. First call index_codebase on the working directory. Initial indexing and reindexing always start in the background. If async=false is sent for those runs, it is ignored because they may exceed MCP client timeouts; use get_indexing_status for progress. Incremental refreshes can still use async=false to wait for completion. Then call search_code on that indexed working directory or one of its subdirectories. Use clear_index to remove stored index data."
 	indexToolDescription  = "Create or refresh a semantic index for a local codebase. Initial indexing and reindexing always start in the background; incremental refreshes can still wait with async=false, or you can poll with get_indexing_status."
 	indexAsyncDescription = "Run asynchronously by default. Ignored for an initial full index or any reindex because those runs may exceed MCP client timeouts; set async=false only to wait for incremental refresh completion."
 )
@@ -824,7 +824,7 @@ func New(cfg *config.Config, h *handler.Handler) *server.MCPServer {
 
 	indexTool := mcp.NewTool("index_codebase",
 		mcp.WithDescription(indexToolDescription),
-		mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path to the local codebase root to index. Prefer the project root so ignore-file handling and status tracking stay stable.")),
+		mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path to the local codebase root to index. Prefer the working directory so ignore-file handling and status tracking stay stable.")),
 		mcp.WithBoolean("reindex", mcp.Description("Delete existing index data for this codebase path before rebuilding."), mcp.DefaultBool(false)),
 		mcp.WithBoolean("async", mcp.Description(indexAsyncDescription), mcp.DefaultBool(true)),
 		mcp.WithArray("ignorePatterns", mcp.Description("Extra ignore patterns to apply in addition to .gitignore, .indexignore, and Git exclude rules."), mcp.WithStringItems()),
@@ -8656,207 +8656,207 @@ func TestHandleIndex_IncrementalIndex_LoadHashMapError(t *testing.T) {
 package handler
 
 import (
-	"cfmantic-code/internal/milvus"
-	"cfmantic-code/internal/mocks"
-	"cfmantic-code/internal/snapshot"
-	"cfmantic-code/internal/splitter"
-	"cfmantic-code/internal/walker"
-	"context"
-	"os"
-	"path/filepath"
-	"testing"
+  "cfmantic-code/internal/milvus"
+  "cfmantic-code/internal/mocks"
+  "cfmantic-code/internal/snapshot"
+  "cfmantic-code/internal/splitter"
+  "cfmantic-code/internal/walker"
+  "context"
+  "os"
+  "path/filepath"
+  "testing"
 
-	filesync "cfmantic-code/internal/sync"
+  filesync "cfmantic-code/internal/sync"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/mock"
-	"github.com/stretchr/testify/require"
+  "github.com/stretchr/testify/assert"
+  "github.com/stretchr/testify/mock"
+  "github.com/stretchr/testify/require"
 )
 
 func TestFullRunParams_ExtraCleanupReleasesSemaphore(t *testing.T) {
-	mc := mocks.NewMockVectorClient(t)
-	sm := mocks.NewMockStatusManager(t)
-	sp := mocks.NewMockSplitter(t)
-	h := newTestHandler(t, mc, sm, sp, nil)
+  mc := mocks.NewMockVectorClient(t)
+  sm := mocks.NewMockStatusManager(t)
+  sp := mocks.NewMockSplitter(t)
+  h := newTestHandler(t, mc, sm, sp, nil)
 
-	path := t.TempDir()
-	tracker := snapshot.NewTracker(snapshot.NewManager(), path, snapshot.OperationMetadata{})
-	params := h.fullRunParams(context.Background(), path, snapshot.CollectionName(path), nil, tracker)
-	require.NotNil(t, params)
-	require.Len(t, params.Boundary.ExtraCleanups, 1)
+  path := t.TempDir()
+  tracker := snapshot.NewTracker(snapshot.NewManager(), path, snapshot.OperationMetadata{})
+  params := h.fullRunParams(context.Background(), path, snapshot.CollectionName(path), nil, tracker)
+  require.NotNil(t, params)
+  require.Len(t, params.Boundary.ExtraCleanups, 1)
 
-	h.indexSem <- struct{}{}
+  h.indexSem <- struct{}{}
 
-	params.Boundary.ExtraCleanups[0]()
+  params.Boundary.ExtraCleanups[0]()
 
-	select {
-	case h.indexSem <- struct{}{}:
-		<-h.indexSem
-	default:
-		t.Fatal("index semaphore was not released")
-	}
+  select {
+  case h.indexSem <- struct{}{}:
+    <-h.indexSem
+  default:
+    t.Fatal("index semaphore was not released")
+  }
 }
 
 func TestIncrementalRunParams_ExtraCleanupReleasesSemaphore(t *testing.T) {
-	mc := mocks.NewMockVectorClient(t)
-	sm := mocks.NewMockStatusManager(t)
-	sp := mocks.NewMockSplitter(t)
-	h := newTestHandler(t, mc, sm, sp, nil)
+  mc := mocks.NewMockVectorClient(t)
+  sm := mocks.NewMockStatusManager(t)
+  sp := mocks.NewMockSplitter(t)
+  h := newTestHandler(t, mc, sm, sp, nil)
 
-	path := t.TempDir()
-	tracker := snapshot.NewTracker(snapshot.NewManager(), path, snapshot.OperationMetadata{})
-	params := h.incrementalRunParams(context.Background(), path, nil, tracker)
-	require.NotNil(t, params)
-	require.Len(t, params.Boundary.ExtraCleanups, 1)
+  path := t.TempDir()
+  tracker := snapshot.NewTracker(snapshot.NewManager(), path, snapshot.OperationMetadata{})
+  params := h.incrementalRunParams(context.Background(), path, nil, tracker)
+  require.NotNil(t, params)
+  require.Len(t, params.Boundary.ExtraCleanups, 1)
 
-	h.indexSem <- struct{}{}
+  h.indexSem <- struct{}{}
 
-	params.Boundary.ExtraCleanups[0]()
+  params.Boundary.ExtraCleanups[0]()
 
-	select {
-	case h.indexSem <- struct{}{}:
-		<-h.indexSem
-	default:
-		t.Fatal("index semaphore was not released")
-	}
+  select {
+  case h.indexSem <- struct{}{}:
+    <-h.indexSem
+  default:
+    t.Fatal("index semaphore was not released")
+  }
 }
 
 func TestFullRunParams_WalkFilesUsesProvidedContext(t *testing.T) {
-	mc := mocks.NewMockVectorClient(t)
-	sm := mocks.NewMockStatusManager(t)
-	sp := mocks.NewMockSplitter(t)
-	h := newTestHandler(t, mc, sm, sp, nil)
+  mc := mocks.NewMockVectorClient(t)
+  sm := mocks.NewMockStatusManager(t)
+  sp := mocks.NewMockSplitter(t)
+  h := newTestHandler(t, mc, sm, sp, nil)
 
-	path := t.TempDir()
-	tracker := snapshot.NewTracker(snapshot.NewManager(), path, snapshot.OperationMetadata{})
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+  path := t.TempDir()
+  tracker := snapshot.NewTracker(snapshot.NewManager(), path, snapshot.OperationMetadata{})
+  ctx, cancel := context.WithCancel(context.Background())
+  cancel()
 
-	params := h.fullRunParams(ctx, path, snapshot.CollectionName(path), nil, tracker)
+  params := h.fullRunParams(ctx, path, snapshot.CollectionName(path), nil, tracker)
 
-	files, err := params.WalkFiles()
-	require.Error(t, err)
-	require.ErrorIs(t, err, context.Canceled)
-	assert.Nil(t, files)
+  files, err := params.WalkFiles()
+  require.Error(t, err)
+  require.ErrorIs(t, err, context.Canceled)
+  assert.Nil(t, files)
 }
 
 func TestHandlerProcessFilesFlushesTrackerProgress(t *testing.T) {
-	mc := mocks.NewMockVectorClient(t)
-	sm := snapshot.NewManager()
-	sp := mocks.NewMockSplitter(t)
-	h := New(mc, sm, loadTestConfig(t), sp, nil)
+  mc := mocks.NewMockVectorClient(t)
+  sm := snapshot.NewManager()
+  sp := mocks.NewMockSplitter(t)
+  h := New(mc, sm, loadTestConfig(t), sp, nil)
 
-	path := t.TempDir()
-	filePath := filepath.Join(path, "main.go")
-	require.NoError(t, os.WriteFile(filePath, []byte("package main\n"), 0o644))
+  path := t.TempDir()
+  filePath := filepath.Join(path, "main.go")
+  require.NoError(t, os.WriteFile(filePath, []byte("package main\n"), 0o644))
 
-	collection := snapshot.CollectionName(path)
+  collection := snapshot.CollectionName(path)
 
-	expectSplitChunks(t, sp, "main.go", []splitter.Chunk{{Content: "package main", StartLine: 1, EndLine: 1}})
-	mc.On("Insert", mock.Anything, collection, mock.Anything).Return(&milvus.InsertResult{InsertCount: 1}, nil).Once()
+  expectSplitChunks(t, sp, "main.go", []splitter.Chunk{{Content: "package main", StartLine: 1, EndLine: 1}})
+  mc.On("Insert", mock.Anything, collection, mock.Anything).Return(&milvus.InsertResult{InsertCount: 1}, nil).Once()
 
-	tracker := snapshot.NewTracker(sm, path, snapshot.OperationMetadata{Operation: "indexing", Source: "manual", Mode: "full"})
-	result := h.processFiles(context.Background(), path, collection, []walker.CodeFile{{RelPath: "main.go", AbsPath: filePath, Extension: ".go"}}, nil, false, tracker)
-	require.Empty(t, result.err)
+  tracker := snapshot.NewTracker(sm, path, snapshot.OperationMetadata{Operation: "indexing", Source: "manual", Mode: "full"})
+  result := h.processFiles(context.Background(), path, collection, []walker.CodeFile{{RelPath: "main.go", AbsPath: filePath, Extension: ".go"}}, nil, false, tracker)
+  require.Empty(t, result.err)
 
-	info := sm.GetInfo(path)
-	require.NotNil(t, info)
-	assert.Equal(t, 1, info.FilesDone)
-	assert.Equal(t, 1, info.FilesTotal)
-	assert.Equal(t, 1, info.ChunksTotal)
-	assert.Equal(t, 1, info.ChunksInserted)
+  info := sm.GetInfo(path)
+  require.NotNil(t, info)
+  assert.Equal(t, 1, info.FilesDone)
+  assert.Equal(t, 1, info.FilesTotal)
+  assert.Equal(t, 1, info.ChunksTotal)
+  assert.Equal(t, 1, info.ChunksInserted)
 }
 
 func TestFullRunParams_AfterSuccessPersistsEffectiveIgnorePatterns(t *testing.T) {
-	mc := mocks.NewMockVectorClient(t)
-	sp := mocks.NewMockSplitter(t)
-	sm := snapshot.NewManager()
-	h := New(mc, sm, loadTestConfig(t), sp, nil)
-	h.cfg.CustomIgnore = []string{"config-only/"}
+  mc := mocks.NewMockVectorClient(t)
+  sp := mocks.NewMockSplitter(t)
+  sm := snapshot.NewManager()
+  h := New(mc, sm, loadTestConfig(t), sp, nil)
+  h.cfg.CustomIgnore = []string{"config-only/"}
 
-	path := t.TempDir()
-	sm.SetIndexed(path, 1, 2)
+  path := t.TempDir()
+  sm.SetIndexed(path, 1, 2)
 
-	tracker := snapshot.NewTracker(sm, path, snapshot.OperationMetadata{})
-	params := h.fullRunParams(context.Background(), path, snapshot.CollectionName(path), []string{"request-only/"}, tracker)
-	require.NotNil(t, params)
-	require.NotNil(t, params.AfterSuccess)
+  tracker := snapshot.NewTracker(sm, path, snapshot.OperationMetadata{})
+  params := h.fullRunParams(context.Background(), path, snapshot.CollectionName(path), []string{"request-only/"}, tracker)
+  require.NotNil(t, params)
+  require.NotNil(t, params.AfterSuccess)
 
-	params.AfterSuccess()
+  params.AfterSuccess()
 
-	info := sm.GetInfo(path)
-	require.NotNil(t, info)
-	require.NotNil(t, info.IgnorePatterns)
-	assert.Equal(t, []string{"config-only/", "request-only/"}, *info.IgnorePatterns)
+  info := sm.GetInfo(path)
+  require.NotNil(t, info)
+  require.NotNil(t, info.IgnorePatterns)
+  assert.Equal(t, []string{"config-only/", "request-only/"}, *info.IgnorePatterns)
 }
 
 func TestIncrementalRunParams_AfterSuccessPersistsEffectiveIgnorePatterns(t *testing.T) {
-	mc := mocks.NewMockVectorClient(t)
-	sp := mocks.NewMockSplitter(t)
-	sm := snapshot.NewManager()
-	h := New(mc, sm, loadTestConfig(t), sp, nil)
-	h.cfg.CustomIgnore = []string{"config-only/"}
+  mc := mocks.NewMockVectorClient(t)
+  sp := mocks.NewMockSplitter(t)
+  sm := snapshot.NewManager()
+  h := New(mc, sm, loadTestConfig(t), sp, nil)
+  h.cfg.CustomIgnore = []string{"config-only/"}
 
-	path := t.TempDir()
-	sm.SetIndexed(path, 1, 2)
+  path := t.TempDir()
+  sm.SetIndexed(path, 1, 2)
 
-	tracker := snapshot.NewTracker(sm, path, snapshot.OperationMetadata{})
-	params := h.incrementalRunParams(context.Background(), path, []string{"request-only/"}, tracker)
-	require.NotNil(t, params)
-	require.NotNil(t, params.AfterSuccess)
+  tracker := snapshot.NewTracker(sm, path, snapshot.OperationMetadata{})
+  params := h.incrementalRunParams(context.Background(), path, []string{"request-only/"}, tracker)
+  require.NotNil(t, params)
+  require.NotNil(t, params.AfterSuccess)
 
-	params.AfterSuccess()
+  params.AfterSuccess()
 
-	info := sm.GetInfo(path)
-	require.NotNil(t, info)
-	require.NotNil(t, info.IgnorePatterns)
-	assert.Equal(t, []string{"config-only/", "request-only/"}, *info.IgnorePatterns)
+  info := sm.GetInfo(path)
+  require.NotNil(t, info)
+  require.NotNil(t, info.IgnorePatterns)
+  assert.Equal(t, []string{"config-only/", "request-only/"}, *info.IgnorePatterns)
 }
 
 func prepareFailedSnapshotForAfterSuccess(t *testing.T, sm *snapshot.Manager, path string) {
-	t.Helper()
+  t.Helper()
 
-	conflict := filepath.Join(snapshot.MetadataDirPath(path), "state.json.tmp")
-	require.NoError(t, os.MkdirAll(conflict, 0o755))
+  conflict := filepath.Join(snapshot.MetadataDirPath(path), "state.json.tmp")
+  require.NoError(t, os.MkdirAll(conflict, 0o755))
 
-	sm.SetIndexed(path, 1, 2)
+  sm.SetIndexed(path, 1, 2)
 
-	info := sm.GetInfo(path)
-	require.NotNil(t, info)
-	assert.Equal(t, snapshot.StatusFailed, info.Status)
-	assert.Contains(t, info.ErrorMessage, "failed to persist indexed state")
+  info := sm.GetInfo(path)
+  require.NotNil(t, info)
+  assert.Equal(t, snapshot.StatusFailed, info.Status)
+  assert.Contains(t, info.ErrorMessage, "failed to persist indexed state")
 }
 
 func TestFullRunParams_AfterSuccessSkipsFollowUpsOnPersistenceFailure(t *testing.T) {
-	mc := mocks.NewMockVectorClient(t)
-	sp := mocks.NewMockSplitter(t)
-	sm := snapshot.NewManager()
-	cfg := loadTestConfig(t)
-	syncMgr := filesync.NewManager(mc, sm, sp, cfg, 300)
-	h := New(mc, sm, cfg, sp, syncMgr)
+  mc := mocks.NewMockVectorClient(t)
+  sp := mocks.NewMockSplitter(t)
+  sm := snapshot.NewManager()
+  cfg := loadTestConfig(t)
+  syncMgr := filesync.NewManager(mc, sm, sp, cfg, 300)
+  h := New(mc, sm, cfg, sp, syncMgr)
 
-	path := t.TempDir()
-	prepareFailedSnapshotForAfterSuccess(t, sm, path)
+  path := t.TempDir()
+  prepareFailedSnapshotForAfterSuccess(t, sm, path)
 
-	tracker := snapshot.NewTracker(sm, path, snapshot.OperationMetadata{})
-	params := h.fullRunParams(context.Background(), path, snapshot.CollectionName(path), []string{"request-only/"}, tracker)
-	require.NotNil(t, params.AfterSuccess)
+  tracker := snapshot.NewTracker(sm, path, snapshot.OperationMetadata{})
+  params := h.fullRunParams(context.Background(), path, snapshot.CollectionName(path), []string{"request-only/"}, tracker)
+  require.NotNil(t, params.AfterSuccess)
 
-	params.AfterSuccess()
+  params.AfterSuccess()
 
-	info := sm.GetInfo(path)
-	require.NotNil(t, info)
-	assert.Equal(t, snapshot.StatusFailed, info.Status)
-	assert.Nil(t, info.IgnorePatterns)
+  info := sm.GetInfo(path)
+  require.NotNil(t, info)
+  assert.Equal(t, snapshot.StatusFailed, info.Status)
+  assert.Nil(t, info.IgnorePatterns)
 
-	trackedParent, ok := syncMgr.TrackedParent(filepath.Join(path, "child"))
-	assert.False(t, ok)
-	assert.Empty(t, trackedParent)
+  trackedParent, ok := syncMgr.TrackedParent(filepath.Join(path, "child"))
+  assert.False(t, ok)
+  assert.Empty(t, trackedParent)
 
-...7379 bytes truncated...
+  ...7379 bytes truncated...
 
-The tool call succeeded but the output was truncated. Full output saved to: /home/jaryl/.local/share/opencode/tool-output/tool_d0523e276001Q8EPzWV7uXD1fG
-Use the Task tool to have explore agent process this file with Grep and Read (with offset/limit). Do NOT read the full file yourself - delegate to save context.
+  The tool call succeeded but the output was truncated. Full output saved to: /home/jaryl/.local/share/opencode/tool-output/tool_d0523e276001Q8EPzWV7uXD1fG
+  Use the Task tool to have explore agent process this file with Grep and Read (with offset/limit). Do NOT read the full file yourself - delegate to save context.
 ```
 
 ---

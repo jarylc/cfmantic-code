@@ -123,6 +123,14 @@ func (h *Handler) HandleIndex(ctx context.Context, req mcp.CallToolRequest) (*mc
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 
+	if managedRoot, ok, err := h.managedRootFromCurrentWorkingDir(path); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	} else if ok && isStrictAncestorPath(path, managedRoot) {
+		return mcp.NewToolResultError(
+			fmt.Sprintf("cannot index parent path %q: managed root %q is already tracked", path, managedRoot),
+		), nil
+	}
+
 	if err := h.repairIndexPathMismatches(ctx, path); err != nil {
 		return mcp.NewToolResultError("failed to clear remote index: " + formatMilvusToolError(err, path)), nil
 	}
@@ -137,7 +145,7 @@ func (h *Handler) HandleIndex(ctx context.Context, req mcp.CallToolRequest) (*mc
 	case h.indexSem <- struct{}{}:
 		// acquired — proceed with indexing
 	default:
-		return mcp.NewToolResultText("Indexing already in progress, please wait"), nil
+		return mcp.NewToolResultError("Indexing already in progress, please wait"), nil
 	}
 
 	releaseSem := true
@@ -487,7 +495,10 @@ func (h *Handler) HandleStatus(ctx context.Context, req mcp.CallToolRequest) (*m
 
 	const timeFmt = "2006-01-02T15:04:05Z07:00"
 
-	var msg string
+	var (
+		msg     string
+		isError bool
+	)
 
 	startedAt := info.StartedAt
 	if startedAt.IsZero() {
@@ -542,12 +553,19 @@ func (h *Handler) HandleStatus(ctx context.Context, req mcp.CallToolRequest) (*m
 		if strings.Contains(strings.ToLower(info.ErrorMessage), "try again") {
 			msg += "\n\nPartial progress was saved. Run index_codebase (without reindex) to continue where indexing left off."
 		}
+
+		isError = true
 	default:
 		msg = "Unknown status for " + statusPath
+		isError = true
 	}
 
 	if len(details) > 0 {
 		msg += "\n" + strings.Join(details, "\n")
+	}
+
+	if isError {
+		return mcp.NewToolResultError(msg), nil
 	}
 
 	return mcp.NewToolResultText(msg), nil
@@ -820,6 +838,43 @@ func (h *Handler) nearestManagedAncestor(path string) (string, snapshot.Status, 
 	}
 
 	return "", snapshot.StatusNotFound, false
+}
+
+func (h *Handler) managedRootFromCurrentWorkingDir(requestPath string) (string, bool, error) {
+	cwd, err := CanonicalizePath(".")
+	if err != nil {
+		return "", false, err
+	}
+
+	if !isStrictAncestorPath(requestPath, cwd) {
+		return "", false, nil
+	}
+
+	if hasSnapshotState(cwd) {
+		return cwd, true, nil
+	}
+
+	root, _, ok := h.nearestManagedAncestor(cwd)
+	if !ok {
+		return "", false, nil
+	}
+
+	return root, true, nil
+}
+
+func isStrictAncestorPath(ancestor, descendant string) bool {
+	ancestor = filepath.Clean(ancestor)
+	descendant = filepath.Clean(descendant)
+
+	if ancestor == descendant {
+		return false
+	}
+
+	if ancestor == string(os.PathSeparator) {
+		return strings.HasPrefix(descendant, ancestor)
+	}
+
+	return strings.HasPrefix(descendant, ancestor+string(os.PathSeparator))
 }
 
 func (h *Handler) nearestManagedStatusAncestor(path string) (string, snapshot.Status, bool, error) {

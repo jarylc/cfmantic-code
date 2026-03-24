@@ -294,7 +294,7 @@ func Run(ctx context.Context, cfg *Config, files []walker.CodeFile, sp splitter.
 	// Start inserter goroutine: batch entities, fire parallel inserts bounded by semaphore.
 	var (
 		insertWg    sync.WaitGroup
-		totalChunks int64
+		totalChunks atomic.Int64
 	)
 
 	insertSem := make(chan struct{}, insertConcurrency)
@@ -370,7 +370,7 @@ func Run(ctx context.Context, cfg *Config, files []walker.CodeFile, sp splitter.
 
 			if len(result.entities) > 0 {
 				batch = append(batch, result.entities...)
-				atomic.AddInt64(&totalChunks, int64(len(result.entities)))
+				totalChunks.Add(int64(len(result.entities)))
 
 				chunkCounts[result.relPath] += len(result.entities)
 				if fileChunkIDs != nil {
@@ -427,7 +427,7 @@ feedLoop:
 	insertWg.Wait()
 
 	result := Result{
-		TotalChunks:    int(atomic.LoadInt64(&totalChunks)),
+		TotalChunks:    int(totalChunks.Load()),
 		ChunkCounts:    chunkCounts,
 		CompletedFiles: tracker.completedFiles(),
 	}

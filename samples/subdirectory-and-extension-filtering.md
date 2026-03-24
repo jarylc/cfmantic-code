@@ -814,7 +814,7 @@ import (
 )
 
 const (
-	serverInstructions    = "Semantic code search for local codebases. First call index_codebase on a project root. Initial indexing and reindexing always start in the background. If async=false is sent for those runs, it is ignored because they may exceed MCP client timeouts; use get_indexing_status for progress. Incremental refreshes can still use async=false to wait for completion. Then call search_code on that indexed root or one of its subdirectories. Use clear_index to remove stored index data."
+	serverInstructions    = "Semantic code search for local codebases. First call index_codebase on the working directory. Initial indexing and reindexing always start in the background. If async=false is sent for those runs, it is ignored because they may exceed MCP client timeouts; use get_indexing_status for progress. Incremental refreshes can still use async=false to wait for completion. Then call search_code on that indexed working directory or one of its subdirectories. Use clear_index to remove stored index data."
 	indexToolDescription  = "Create or refresh a semantic index for a local codebase. Initial indexing and reindexing always start in the background; incremental refreshes can still wait with async=false, or you can poll with get_indexing_status."
 	indexAsyncDescription = "Run asynchronously by default. Ignored for an initial full index or any reindex because those runs may exceed MCP client timeouts; set async=false only to wait for incremental refresh completion."
 )
@@ -830,7 +830,7 @@ func New(cfg *config.Config, h *handler.Handler) *server.MCPServer {
 
 	indexTool := mcp.NewTool("index_codebase",
 		mcp.WithDescription(indexToolDescription),
-		mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path to the local codebase root to index. Prefer the project root so ignore-file handling and status tracking stay stable.")),
+		mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path to the local codebase root to index. Prefer the working directory so ignore-file handling and status tracking stay stable.")),
 		mcp.WithBoolean("reindex", mcp.Description("Delete existing index data for this codebase path before rebuilding."), mcp.DefaultBool(false)),
 		mcp.WithBoolean("async", mcp.Description(indexAsyncDescription), mcp.DefaultBool(true)),
 		mcp.WithArray("ignorePatterns", mcp.Description("Extra ignore patterns to apply in addition to .gitignore, .indexignore, and Git exclude rules."), mcp.WithStringItems()),
