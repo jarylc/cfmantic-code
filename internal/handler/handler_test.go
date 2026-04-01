@@ -156,6 +156,11 @@ func assertAsyncFalseIgnoredMessage(t *testing.T, text string) {
 	assert.Contains(t, text, "may exceed MCP client timeouts")
 }
 
+func assertSuggestsInitialWorkingDirectory(t *testing.T, text, initialWorkingDir string) {
+	t.Helper()
+	assert.True(t, strings.HasSuffix(text, "did you mean \""+initialWorkingDir+"\"?"), "expected error to end with quoted initial working directory suggestion, got %q", text)
+}
+
 // waitForDone waits for the done channel or fails the test on timeout.
 func waitForDone(t *testing.T, done <-chan struct{}, timeout time.Duration) {
 	t.Helper()
@@ -804,37 +809,133 @@ func TestHandleIndex_FailedAncestorFromSnapshotAfterRestart_ReturnsMachineFriend
 	mc.AssertNotCalled(t, "CreateCollection", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
 }
 
-func TestHandleIndex_CwdInsideManagedRoot_AncestorTargetReturnsMachineFriendlyError(t *testing.T) {
+func TestHandleIndex_AncestorOfInitialWorkingDirectory_ReturnsLLMFriendlyError(t *testing.T) {
 	mc := mocks.NewMockVectorClient(t)
 	sp := mocks.NewMockSplitter(t)
 	cfg := loadTestConfig(t)
 
 	outer := t.TempDir()
-	managedRoot := filepath.Join(outer, "managed")
-	cwd := filepath.Join(managedRoot, "nested")
-	require.NoError(t, os.MkdirAll(cwd, 0o755))
+	startupWorkingDir := filepath.Join(outer, "managed")
+	liveCwd := filepath.Join(startupWorkingDir, "nested")
+	require.NoError(t, os.MkdirAll(liveCwd, 0o755))
 
-	persistedSnapshot := snapshot.NewManager()
-	persistedSnapshot.SetIndexed(managedRoot, 2, 4)
-
-	t.Chdir(cwd)
+	t.Chdir(startupWorkingDir)
 
 	h := New(mc, snapshot.NewManager(), cfg, sp, nil)
 
+	t.Chdir(liveCwd)
+
 	res, err := h.HandleIndex(context.Background(), makeReq(map[string]any{
-		"path":  filepath.Join("..", ".."),
+		"path":  outer,
 		"async": true,
 	}))
 	require.NoError(t, err)
 	require.NotNil(t, res)
 	assert.True(t, res.IsError)
 	assert.Equal(t,
-		fmt.Sprintf("cannot index parent path %q: managed root %q is already tracked", outer, managedRoot),
+		fmt.Sprintf("cannot index ancestor path %q because it contains the initial working directory %q; did you mean %q?", outer, startupWorkingDir, startupWorkingDir),
 		resultText(t, res),
 	)
+	assertSuggestsInitialWorkingDirectory(t, resultText(t, res), startupWorkingDir)
 
 	mc.AssertNotCalled(t, "CreateCollection", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
 	mc.AssertNotCalled(t, "DropCollection", mock.Anything, mock.Anything)
+}
+
+func TestHandleIndex_UsesInitialWorkingDirectoryInsteadOfLiveCwd(t *testing.T) {
+	mc := mocks.NewMockVectorClient(t)
+	sp := mocks.NewMockSplitter(t)
+	cfg := loadTestConfig(t)
+	sm := snapshot.NewManager()
+
+	outer := t.TempDir()
+	startupWorkingDir := filepath.Join(outer, "workspace")
+	indexPath := filepath.Join(startupWorkingDir, "nested")
+	liveCwd := filepath.Join(indexPath, "deeper")
+	require.NoError(t, os.MkdirAll(liveCwd, 0o755))
+
+	t.Chdir(startupWorkingDir)
+
+	h := New(mc, sm, cfg, sp, nil)
+
+	t.Chdir(liveCwd)
+
+	mc.On("CreateCollection", mock.Anything, snapshot.CollectionName(indexPath), cfg.EmbeddingDimension, true).Return(nil).Once()
+
+	res, err := h.HandleIndex(context.Background(), makeReq(map[string]any{
+		"path":  indexPath,
+		"async": true,
+	}))
+	require.NoError(t, err)
+	assert.False(t, res.IsError)
+	assert.Contains(t, resultText(t, res), "Indexing started")
+
+	require.Eventually(t, func() bool {
+		return sm.GetStatus(indexPath) == snapshot.StatusIndexed
+	}, 5*time.Second, 5*time.Millisecond)
+
+	lockPath := snapshot.LockFilePath(indexPath)
+
+	require.Eventually(t, func() bool {
+		_, statErr := os.Stat(lockPath)
+		return os.IsNotExist(statErr)
+	}, 5*time.Second, 5*time.Millisecond, "background goroutine did not exit in time")
+}
+
+func TestHandleIndex_InitialWorkingDirectoryAncestorRestriction_AllowsSiblingAndUnrelatedPaths(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		path string
+	}{
+		{name: "sibling", path: "sibling"},
+		{name: "unrelated", path: "unrelated"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mc := mocks.NewMockVectorClient(t)
+			sp := mocks.NewMockSplitter(t)
+			cfg := loadTestConfig(t)
+			sm := snapshot.NewManager()
+
+			base := t.TempDir()
+			startupWorkingDir := filepath.Join(base, "workspace")
+			siblingPath := filepath.Join(base, "sibling")
+			unrelatedPath := filepath.Join(t.TempDir(), "elsewhere")
+
+			require.NoError(t, os.MkdirAll(startupWorkingDir, 0o755))
+			require.NoError(t, os.MkdirAll(siblingPath, 0o755))
+			require.NoError(t, os.MkdirAll(unrelatedPath, 0o755))
+
+			t.Chdir(startupWorkingDir)
+
+			h := New(mc, sm, cfg, sp, nil)
+
+			targetPath := siblingPath
+			if tc.path == "unrelated" {
+				targetPath = unrelatedPath
+			}
+
+			mc.On("CreateCollection", mock.Anything, snapshot.CollectionName(targetPath), cfg.EmbeddingDimension, true).Return(nil).Once()
+
+			res, err := h.HandleIndex(context.Background(), makeReq(map[string]any{
+				"path":  targetPath,
+				"async": true,
+			}))
+			require.NoError(t, err)
+			assert.False(t, res.IsError)
+			assert.Contains(t, resultText(t, res), "Indexing started")
+
+			require.Eventually(t, func() bool {
+				return sm.GetStatus(targetPath) == snapshot.StatusIndexed
+			}, 5*time.Second, 5*time.Millisecond)
+
+			lockPath := snapshot.LockFilePath(targetPath)
+
+			require.Eventually(t, func() bool {
+				_, statErr := os.Stat(lockPath)
+				return os.IsNotExist(statErr)
+			}, 5*time.Second, 5*time.Millisecond, "background goroutine did not exit in time")
+		})
+	}
 }
 
 func TestHandleIndex_MoveRenameDetectedAtPath_ClearsStaleIndexAndStartsFresh(t *testing.T) {

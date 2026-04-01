@@ -193,6 +193,12 @@ func Run(ctx context.Context, cfg *Config, files []walker.CodeFile, sp splitter.
 		select {
 		case <-stopCh:
 			return context.Canceled
+		default:
+		}
+
+		select {
+		case <-stopCh:
+			return context.Canceled
 		case resultsCh <- result:
 			return nil
 		}
@@ -263,6 +269,10 @@ func Run(ctx context.Context, cfg *Config, files []walker.CodeFile, sp splitter.
 				}
 
 				if buildErr != nil {
+					if errors.Is(buildErr, context.Canceled) {
+						return
+					}
+
 					if isStopped() {
 						return
 					}

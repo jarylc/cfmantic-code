@@ -85,7 +85,8 @@ type Handler struct {
 	cfg                     *config.Config
 	splitter                splitter.Splitter
 	syncMgr                 *filesync.Manager // may be nil if sync disabled
-	indexSem                chan struct{}     // single-slot semaphore: at most one indexing op per process
+	initialWorkingDir       string
+	indexSem                chan struct{} // single-slot semaphore: at most one indexing op per process
 	activeManualIndexMu     sync.Mutex
 	activeManualIndexByPath map[string]*activeManualIndex
 }
@@ -104,6 +105,7 @@ func New(mc milvus.VectorClient, sm snapshot.StatusManager, cfg *config.Config, 
 		cfg:                     cfg,
 		splitter:                sp,
 		syncMgr:                 syncMgr,
+		initialWorkingDir:       resolveInitialWorkingDirectory(CanonicalizePath),
 		indexSem:                make(chan struct{}, 1),
 		activeManualIndexByPath: make(map[string]*activeManualIndex),
 	}
@@ -123,11 +125,9 @@ func (h *Handler) HandleIndex(ctx context.Context, req mcp.CallToolRequest) (*mc
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 
-	if managedRoot, ok, err := h.managedRootFromCurrentWorkingDir(path); err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
-	} else if ok && isStrictAncestorPath(path, managedRoot) {
+	if initialWorkingDir, ok := h.initialWorkingDirectoryForAncestorPath(path); ok {
 		return mcp.NewToolResultError(
-			fmt.Sprintf("cannot index parent path %q: managed root %q is already tracked", path, managedRoot),
+			formatInitialWorkingDirectoryAncestorError(path, initialWorkingDir),
 		), nil
 	}
 
@@ -370,6 +370,10 @@ func formatMissingRemoteIndexError(path string) string {
 	return "remote index is missing. " + formatAskUserBeforeReindex(
 		fmt.Sprintf("run index_codebase with reindex=true for %q to rebuild remote state", path),
 	)
+}
+
+func formatInitialWorkingDirectoryAncestorError(path, initialWorkingDir string) string {
+	return fmt.Sprintf("cannot index ancestor path %q because it contains the initial working directory %q; did you mean %q?", path, initialWorkingDir, initialWorkingDir)
 }
 
 func formatMilvusToolError(err error, path string) string {
@@ -639,6 +643,20 @@ func canonicalizePath(rawPath string) (string, error) {
 	return CanonicalizePath(rawPath)
 }
 
+func resolveInitialWorkingDirectory(canonicalize func(string) (string, error)) string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+
+	path, err := canonicalize(cwd)
+	if err != nil {
+		return cwd
+	}
+
+	return path
+}
+
 // pipelineResult holds the outcome of processFiles.
 type pipelineResult struct {
 	totalChunks  int
@@ -840,26 +858,12 @@ func (h *Handler) nearestManagedAncestor(path string) (string, snapshot.Status, 
 	return "", snapshot.StatusNotFound, false
 }
 
-func (h *Handler) managedRootFromCurrentWorkingDir(requestPath string) (string, bool, error) {
-	cwd, err := CanonicalizePath(".")
-	if err != nil {
-		return "", false, err
+func (h *Handler) initialWorkingDirectoryForAncestorPath(requestPath string) (string, bool) {
+	if h.initialWorkingDir == "" || !isStrictAncestorPath(requestPath, h.initialWorkingDir) {
+		return "", false
 	}
 
-	if !isStrictAncestorPath(requestPath, cwd) {
-		return "", false, nil
-	}
-
-	if hasSnapshotState(cwd) {
-		return cwd, true, nil
-	}
-
-	root, _, ok := h.nearestManagedAncestor(cwd)
-	if !ok {
-		return "", false, nil
-	}
-
-	return root, true, nil
+	return h.initialWorkingDir, true
 }
 
 func isStrictAncestorPath(ancestor, descendant string) bool {

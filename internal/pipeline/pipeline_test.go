@@ -393,15 +393,19 @@ func TestRun_StopBeforeFileDoneResultKeepsConcurrentLaterFilesIncomplete(t *test
 	sp := newMockSplitter(t)
 
 	insertCtxDone := make(chan (<-chan struct{}), 1)
+	firstEmitDone := make(chan struct{})
+	stopSeen := make(chan struct{})
 
 	sp.On("Split", testifymock.Anything, "first.go", testifymock.Anything).
 		Run(func(args testifymock.Arguments) {
 			emit, ok := args.Get(2).(splitter.EmitChunkFunc)
 			require.True(t, ok)
 			require.NoError(t, emit(splitter.Chunk{Content: "first", StartLine: 1, EndLine: 1}))
+			close(firstEmitDone)
 
 			ctxDone := <-insertCtxDone
 			<-ctxDone
+			close(stopSeen)
 		}).
 		Return(nil).
 		Once()
@@ -410,7 +414,8 @@ func TestRun_StopBeforeFileDoneResultKeepsConcurrentLaterFilesIncomplete(t *test
 		Run(func(args testifymock.Arguments) {
 			emit, ok := args.Get(2).(splitter.EmitChunkFunc)
 			require.True(t, ok)
-			require.NoError(t, emit(splitter.Chunk{Content: "second", StartLine: 1, EndLine: 1}))
+			<-stopSeen
+			require.ErrorIs(t, emit(splitter.Chunk{Content: "second", StartLine: 1, EndLine: 1}), context.Canceled)
 		}).
 		Return(nil).
 		Maybe()
@@ -421,6 +426,8 @@ func TestRun_StopBeforeFileDoneResultKeepsConcurrentLaterFilesIncomplete(t *test
 			require.True(t, ok)
 
 			insertCtxDone <- ctx.Done()
+
+			<-firstEmitDone
 		}).
 		Return(nil, errors.New("quota exceeded")).
 		Once()
