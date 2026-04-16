@@ -196,6 +196,26 @@ func TestResolveLanguageForContent_PreservesSupportedPathOverrides(t *testing.T)
 	assert.Equal(t, canonicalLanguageShell, resolved.grammar.ID)
 }
 
+func TestSupportsASTSplit(t *testing.T) {
+	tests := []struct {
+		name     string
+		filePath string
+		content  string
+		want     bool
+	}{
+		{name: "supported path", filePath: "main.go", want: true},
+		{name: "deferred grammar", filePath: "README.md", content: "# title\n", want: false},
+		{name: "content-detected supported language", filePath: "notes.txt", content: "# -*- mode: python -*-\ndef hello():\n    return 1\n", want: true},
+		{name: "unknown plain text", filePath: "notes.txt", content: "just words\n", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, SupportsASTSplit(tt.filePath, []byte(tt.content)))
+		})
+	}
+}
+
 func TestResolveLanguageFromExt_PreservesDeclarationAliases(t *testing.T) {
 	tests := []struct {
 		name         string

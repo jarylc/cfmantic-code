@@ -147,7 +147,7 @@ func TestBuildEntitiesForChunk_ReturnsWrappedOversizeError(t *testing.T) {
 }
 
 func TestSplitOversizedChunk_ReturnsErrorWhenChunkDoesNotShrink(t *testing.T) {
-	_, err := splitOversizedChunk("a.txt", splitter.Chunk{Content: "x", StartLine: 7, EndLine: 7})
+	_, err := splitOversizedChunk("a.txt", splitter.Chunk{Content: "x", StartLine: 7, EndLine: 7}, maxEntityPayloadBytes+1)
 
 	require.ErrorIs(t, err, errCannotSplitOversizedChunk)
 }
@@ -156,6 +156,7 @@ func TestSplitOversizedChunk_ReturnsErrorWhenTooFewChunksRemain(t *testing.T) {
 	_, err := splitOversizedChunk(
 		"spaces.txt",
 		splitter.Chunk{Content: strings.Repeat(" ", 32), StartLine: 9, EndLine: 9},
+		maxEntityPayloadBytes+1,
 	)
 
 	require.ErrorIs(t, err, errCannotSplitOversizedChunk)

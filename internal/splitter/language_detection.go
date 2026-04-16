@@ -59,6 +59,11 @@ func resolveLanguageForContent(filePath string, content []byte) *resolvedLanguag
 	return resolveLanguageFromExt(detected.ext)
 }
 
+func SupportsASTSplit(filePath string, content []byte) bool {
+	resolved := resolveLanguageForContent(filePath, content)
+	return resolved != nil && resolved.grammar.Support == grammarSupportSupportedNow
+}
+
 func resolvedExt(filePath string) string {
 	switch strings.ToLower(filepath.Base(filePath)) {
 	case "makefile", "gnumakefile":

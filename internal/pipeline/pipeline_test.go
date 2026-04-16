@@ -943,6 +943,95 @@ func TestRun_SingleLineOversizedChunkIsSplitWithinPayloadLimit(t *testing.T) {
 	}
 }
 
+func TestRun_UTF8ChunkThatFitsRuneChunkingStillSplitsWithinPayloadLimit(t *testing.T) {
+	dir := t.TempDir()
+	mc := newMockVectorClient(t)
+	sp := newMockSplitter(t)
+
+	content := makeUTF8PayloadContent(24, 180, utf8PayloadGlyph)
+	chunk := splitter.Chunk{Content: content, StartLine: 20, EndLine: 43}
+	expectSplit(t, sp, "utf8.txt", []splitter.Chunk{chunk})
+
+	entity := pipeline.BuildEntity("utf8.txt", ".txt", dir, chunk)
+	require.Greater(t, entityPayloadBytes(t, &entity), 10240)
+
+	var inserted []milvus.Entity
+
+	mc.On("Insert", testifymock.Anything, "col", testifymock.MatchedBy(func(entities []milvus.Entity) bool {
+		inserted = append([]milvus.Entity(nil), entities...)
+		return true
+	})).Return(&milvus.InsertResult{InsertCount: 1}, nil).Once()
+
+	files := []walker.CodeFile{makeFile(t, dir, "utf8.txt", content)}
+	cfg := pipeline.Config{
+		Concurrency:     1,
+		InsertBatchSize: 100,
+		Collection:      "col",
+		CodebasePath:    dir,
+	}
+
+	result, err := pipeline.Run(context.Background(), &cfg, files, sp, mc)
+
+	require.NoError(t, err)
+	require.Greater(t, len(inserted), 1, "oversized UTF-8 chunk should be re-split")
+	assert.Equal(t, len(inserted), result.TotalChunks)
+	assertEntityContentMatchesOriginal(t, content, inserted)
+
+	for i, entity := range inserted {
+		assert.LessOrEqual(t, entityPayloadBytes(t, &entity), 10240, "entity[%d] still exceeds payload limit", i)
+		assert.GreaterOrEqual(t, entity.StartLine, chunk.StartLine, "entity[%d] start line moved backwards", i)
+		assert.LessOrEqual(t, entity.EndLine, chunk.EndLine, "entity[%d] end line moved past original chunk", i)
+	}
+}
+
+func TestRun_ASTCapableUTF8ChunkOversizedRetryKeepsDeclarationBoundaries(t *testing.T) {
+	dir := t.TempDir()
+	mc := newMockVectorClient(t)
+	sp := newMockSplitter(t)
+
+	content := makeGoUTF8PayloadContent([]string{"First", "Second", "Third"}, 14, 120, utf8PayloadGlyph)
+	chunk := splitter.Chunk{Content: content, StartLine: 1, EndLine: strings.Count(content, "\n")}
+	expectSplit(t, sp, "utf8.go", []splitter.Chunk{chunk})
+
+	entity := pipeline.BuildEntity("utf8.go", ".go", dir, chunk)
+	require.Greater(t, entityPayloadBytes(t, &entity), 10240)
+
+	var inserted []milvus.Entity
+
+	mc.On("Insert", testifymock.Anything, "col", testifymock.MatchedBy(func(entities []milvus.Entity) bool {
+		inserted = append([]milvus.Entity(nil), entities...)
+		return true
+	})).Return(&milvus.InsertResult{InsertCount: 1}, nil).Once()
+
+	files := []walker.CodeFile{makeFile(t, dir, "utf8.go", content)}
+	cfg := pipeline.Config{
+		Concurrency:     1,
+		InsertBatchSize: 100,
+		Collection:      "col",
+		CodebasePath:    dir,
+	}
+
+	result, err := pipeline.Run(context.Background(), &cfg, files, sp, mc)
+
+	require.NoError(t, err)
+	require.Greater(t, len(inserted), 1, "oversized AST-capable chunk should be re-split")
+	assert.Equal(t, len(inserted), result.TotalChunks)
+	assertEntityContentMatchesOriginal(t, content, inserted)
+
+	for i, entity := range inserted {
+		assert.LessOrEqual(t, entityPayloadBytes(t, &entity), 10240, "entity[%d] still exceeds payload limit", i)
+		assert.Truef(
+			t,
+			startsAtDeclarationBoundary(entity.Content),
+			"entity[%d] should start at an AST boundary, got %q",
+			i,
+			firstMeaningfulLine(entity.Content),
+		)
+	}
+
+	assert.Contains(t, strings.Join(entityContents(inserted), "\n"), "func Second() string {", "re-split output should still contain the middle declaration")
+}
+
 func entityPayloadBytes(t *testing.T, entity *milvus.Entity) int {
 	t.Helper()
 
@@ -976,6 +1065,66 @@ func makeJSONLikeSingleLineContent(minBytes int) string {
 	builder.WriteString(`]}`)
 
 	return builder.String()
+}
+
+const utf8PayloadGlyph = "\u754c"
+
+func makeUTF8PayloadContent(lineCount, glyphsPerLine int, glyph string) string {
+	lines := make([]string, lineCount)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("line-%03d:%s", i+1, strings.Repeat(glyph, glyphsPerLine))
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+func makeGoUTF8PayloadContent(funcNames []string, linesPerFunc, glyphsPerLine int, glyph string) string {
+	var builder strings.Builder
+	builder.WriteString("package main\n\n")
+
+	for i, funcName := range funcNames {
+		if i > 0 {
+			builder.WriteByte('\n')
+		}
+
+		fmt.Fprintf(&builder, "func %s() string {\n", funcName)
+		builder.WriteString("\treturn `\n")
+
+		for range linesPerFunc {
+			builder.WriteString(strings.Repeat(glyph, glyphsPerLine))
+			builder.WriteByte('\n')
+		}
+
+		builder.WriteString("\t`\n")
+		builder.WriteString("}\n")
+	}
+
+	return builder.String()
+}
+
+func startsAtDeclarationBoundary(content string) bool {
+	line := firstMeaningfulLine(content)
+	return strings.HasPrefix(line, "package ") || strings.HasPrefix(line, "func ")
+}
+
+func firstMeaningfulLine(content string) string {
+	for line := range strings.SplitSeq(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			return trimmed
+		}
+	}
+
+	return ""
+}
+
+func entityContents(entities []milvus.Entity) []string {
+	contents := make([]string, 0, len(entities))
+	for _, entity := range entities {
+		contents = append(contents, entity.Content)
+	}
+
+	return contents
 }
 
 func assertEntityContentMatchesOriginal(t *testing.T, original string, entities []milvus.Entity) {

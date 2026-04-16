@@ -190,6 +190,7 @@ func Run(ctx context.Context, cfg *Config, files []walker.CodeFile, sp splitter.
 	}
 
 	sendResult := func(result fileResult) error {
+		// Fast-path stop check before the blocking results channel send.
 		select {
 		case <-stopCh:
 			return context.Canceled
@@ -515,7 +516,7 @@ func buildEntitiesForChunk(relPath, ext, codebasePath string, chunk splitter.Chu
 		return []milvus.Entity{entity}, nil
 	}
 
-	subChunks, err := splitOversizedChunk(relPath, chunk)
+	subChunks, err := splitOversizedChunk(relPath, chunk, payloadBytes)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"entity payload %d bytes exceeds %d-byte limit at %s:%d-%d: %w",
@@ -551,20 +552,16 @@ func entityPayloadBytes(entity *milvus.Entity) (int, error) {
 	return len(payload), nil
 }
 
-func splitOversizedChunk(relPath string, chunk splitter.Chunk) ([]splitter.Chunk, error) {
-	nextChunkSize := max(utf8.RuneCountInString(chunk.Content)/2, 1)
+func splitOversizedChunk(relPath string, chunk splitter.Chunk, payloadBytes int) ([]splitter.Chunk, error) {
+	nextChunkSize := nextOversizedChunkSize(chunk.Content, payloadBytes)
 
 	var subChunks []splitter.Chunk
 
-	err := splitter.NewTextSplitter(nextChunkSize, oversizedSplitOverlapRunes).Split(
-		strings.NewReader(chunk.Content),
-		relPath,
-		func(subChunk splitter.Chunk) error {
-			subChunks = append(subChunks, subChunk)
+	err := splitOversizedContent(relPath, chunk.Content, nextChunkSize, func(subChunk splitter.Chunk) error {
+		subChunks = append(subChunks, subChunk)
 
-			return nil
-		},
-	)
+		return nil
+	})
 	if err != nil {
 		// Defensive: TextSplitter reads from strings.NewReader and this callback only appends, so tests would need an artificial seam to hit this.
 		return nil, fmt.Errorf("split oversized chunk %s: %w", relPath, err)
@@ -593,6 +590,34 @@ func splitOversizedChunk(relPath string, chunk splitter.Chunk) ([]splitter.Chunk
 	}
 
 	return adjusted, nil
+}
+
+func nextOversizedChunkSize(content string, payloadBytes int) int {
+	currentRunes := utf8.RuneCountInString(content)
+	if currentRunes <= 1 {
+		return 1
+	}
+
+	nextChunkSize := (currentRunes * (maxEntityPayloadBytes - 1)) / max(payloadBytes, 1)
+	nextChunkSize = min(nextChunkSize, currentRunes-1)
+
+	return max(nextChunkSize, 1)
+}
+
+func splitOversizedContent(relPath, content string, chunkSize int, emit splitter.EmitChunkFunc) error {
+	if splitter.SupportsASTSplit(relPath, []byte(content)) {
+		if err := splitter.NewASTSplitter(chunkSize, oversizedSplitOverlapRunes).Split(strings.NewReader(content), relPath, emit); err != nil {
+			return fmt.Errorf("ast split oversized chunk %s: %w", relPath, err)
+		}
+
+		return nil
+	}
+
+	if err := splitter.NewTextSplitter(chunkSize, oversizedSplitOverlapRunes).Split(strings.NewReader(content), relPath, emit); err != nil {
+		return fmt.Errorf("text split oversized chunk %s: %w", relPath, err)
+	}
+
+	return nil
 }
 
 // BuildEntity creates a milvus.Entity from a code chunk. It generates a stable
