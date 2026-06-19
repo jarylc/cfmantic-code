@@ -16,6 +16,9 @@ packages:
   cfmantic-code/internal/milvus:
     interfaces:
       VectorClient:
+  cfmantic-code/internal/pipeline:
+    interfaces:
+      Inserter:
   cfmantic-code/internal/snapshot:
     interfaces:
       StatusManager:
