@@ -1,6 +1,7 @@
 package splitter
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -73,4 +74,27 @@ func TestParseTree_ParsesSupportedLanguageAndNodeKindHandlesNil(t *testing.T) {
 	require.NotNil(t, root)
 	assert.NotEmpty(t, nodeKind(root))
 	assert.Empty(t, nodeKind(nil))
+}
+
+func TestParseTree_ReusesPooledParser(t *testing.T) {
+	resolved := resolveLanguageFromExt(".go")
+	require.NotNil(t, resolved)
+
+	previousPool := astParserPool
+
+	t.Cleanup(func() { astParserPool = previousPool })
+
+	parser := sitter.NewParser()
+	astParserPool = &sync.Pool{}
+	astParserPool.Put(parser)
+
+	tree, err := parseTree([]byte("package main\nfunc main() {}\n"), resolved)
+	require.NoError(t, err)
+	require.NotNil(t, tree)
+	tree.Close()
+
+	pooled, ok := astParserPool.Get().(*sitter.Parser)
+	require.True(t, ok)
+	assert.Same(t, parser, pooled)
+	pooled.Close()
 }

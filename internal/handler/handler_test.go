@@ -41,6 +41,8 @@ func loadTestConfig(t *testing.T) *config.Config {
 
 func newTestHandler(t *testing.T, mc *mocks.MockVectorClient, sm *mocks.MockStatusManager, sp *mocks.MockSplitter, syncMgr *filesync.Manager) *Handler {
 	t.Helper()
+	allowTempDirIndexing(t)
+
 	cfg := loadTestConfig(t)
 
 	return New(mc, sm, cfg, sp, syncMgr)
@@ -201,6 +203,25 @@ func withValidateStoredPathStub(t *testing.T, fn func(string) error) {
 	})
 }
 
+func withIndexPathValidationStub(t *testing.T, fn func(string) error) {
+	t.Helper()
+
+	prev := validateIndexPath
+	validateIndexPath = fn
+
+	t.Cleanup(func() {
+		validateIndexPath = prev
+	})
+}
+
+func allowTempDirIndexing(t *testing.T) {
+	t.Helper()
+
+	withIndexPathValidationStub(t, func(string) error {
+		return nil
+	})
+}
+
 func withRelativePathFilterBuilderStub(t *testing.T, fn func(string, string) (string, error)) {
 	t.Helper()
 
@@ -288,6 +309,40 @@ func TestCanonicalizePath_Symlink(t *testing.T) {
 	assert.Equal(t, realDir, got)
 }
 
+func TestIsTemporaryDirectoryPath(t *testing.T) {
+	tempRoot, err := canonicalizePath(os.TempDir())
+	require.NoError(t, err)
+
+	assert.True(t, isTemporaryDirectoryPath(tempRoot))
+	assert.True(t, isTemporaryDirectoryPath(filepath.Join(tempRoot, "project")))
+	assert.False(t, isTemporaryDirectoryPath(tempRoot+"-project"))
+	assert.False(t, isTemporaryDirectoryPath(filepath.Dir(tempRoot)))
+
+	if os.PathSeparator == '/' {
+		tmpRoot, err := filepath.EvalSymlinks("/tmp")
+		require.NoError(t, err)
+		assert.True(t, isTemporaryDirectoryPath(tmpRoot))
+		assert.True(t, isTemporaryDirectoryPath(filepath.Join(tmpRoot, "project")))
+	}
+}
+
+func TestValidateIndexPathNotTemporary(t *testing.T) {
+	t.Run("rejects temporary directory", func(t *testing.T) {
+		tempPath, err := canonicalizePath(t.TempDir())
+		require.NoError(t, err)
+
+		err = validateIndexPathNotTemporary(tempPath)
+		require.Error(t, err)
+		assert.Equal(t, formatTempDirError(tempPath), err.Error())
+		assert.Contains(t, err.Error(), "leave orphaned indexes")
+	})
+
+	t.Run("allows non temporary directory path", func(t *testing.T) {
+		persistentPath := filepath.Join(string(os.PathSeparator), "persistent-project")
+		require.NoError(t, validateIndexPathNotTemporary(persistentPath))
+	})
+}
+
 // ─── TestNew ─────────────────────────────────────────────────────────────────
 
 func TestNew(t *testing.T) {
@@ -306,6 +361,34 @@ func TestNew(t *testing.T) {
 }
 
 // ─── HandleIndex ─────────────────────────────────────────────────────────────
+
+func TestHandleIndex_TemporaryDirectoryRejectedWithoutSideEffects(t *testing.T) {
+	mc := mocks.NewMockVectorClient(t)
+	sp := mocks.NewMockSplitter(t)
+	sm := snapshot.NewManager()
+	cfg := loadTestConfig(t)
+	h := New(mc, sm, cfg, sp, nil)
+
+	dir, err := canonicalizePath(t.TempDir())
+	require.NoError(t, err)
+
+	res, err := h.HandleIndex(context.Background(), makeReq(map[string]any{
+		"path":  dir,
+		"async": true,
+	}))
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	assert.True(t, res.IsError)
+	assert.Equal(t, formatTempDirError(dir), resultText(t, res))
+	assert.Equal(t, snapshot.StatusNotFound, sm.GetStatus(dir))
+
+	_, statErr := os.Stat(snapshot.MetadataDirPath(dir))
+	assert.True(t, os.IsNotExist(statErr), "temporary directory rejection should not create local index state")
+
+	mc.AssertNotCalled(t, "CreateCollection", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+	mc.AssertNotCalled(t, "DropCollection", mock.Anything, mock.Anything)
+	requireIndexSemaphoreReleased(t, h)
+}
 
 func TestHandleIndex_MissingPath(t *testing.T) {
 	mc := mocks.NewMockVectorClient(t)
@@ -434,6 +517,8 @@ func TestHandleIndex_SemaphoreBlocks(t *testing.T) {
 }
 
 func TestHandleIndex_FreshIndex_ExplicitSyncIsIgnoredAndStartsInBackground(t *testing.T) {
+	allowTempDirIndexing(t)
+
 	mc := mocks.NewMockVectorClient(t)
 	sp := mocks.NewMockSplitter(t)
 	sm := snapshot.NewManager()
@@ -524,6 +609,8 @@ func TestHandleIndex_FreshIndex_DefaultAsyncStartsInBackground(t *testing.T) {
 }
 
 func TestHandleIndex_FreshIndex_AsyncIgnoresRequestCancellation(t *testing.T) {
+	allowTempDirIndexing(t)
+
 	mc := mocks.NewMockVectorClient(t)
 	sp := mocks.NewMockSplitter(t)
 	sm := mocks.NewMockStatusManager(t)
@@ -598,6 +685,8 @@ func TestHandleIndex_FreshIndex_AsyncIgnoresRequestCancellation(t *testing.T) {
 }
 
 func TestHandleIndex_FreshIndex_ExplicitSyncIsIgnoredEvenWhenIndexLaterFails(t *testing.T) {
+	allowTempDirIndexing(t)
+
 	mc := mocks.NewMockVectorClient(t)
 	sp := mocks.NewMockSplitter(t)
 	sm := snapshot.NewManager()
@@ -713,6 +802,8 @@ func TestHandleIndex_FreshIndex_CreateCollectionBackendUnavailable(t *testing.T)
 }
 
 func TestHandleIndex_FreshIndex_WithSyncMgr(t *testing.T) {
+	allowTempDirIndexing(t)
+
 	mc := mocks.NewMockVectorClient(t)
 	sm := mocks.NewMockStatusManager(t)
 	sp := mocks.NewMockSplitter(t)
@@ -752,6 +843,8 @@ func TestHandleIndex_FreshIndex_WithSyncMgr(t *testing.T) {
 }
 
 func TestHandleIndex_IndexedAncestorFromSnapshotAfterRestart_ReturnsMachineFriendlyError(t *testing.T) {
+	allowTempDirIndexing(t)
+
 	mc := mocks.NewMockVectorClient(t)
 	sp := mocks.NewMockSplitter(t)
 	cfg := loadTestConfig(t)
@@ -781,6 +874,8 @@ func TestHandleIndex_IndexedAncestorFromSnapshotAfterRestart_ReturnsMachineFrien
 }
 
 func TestHandleIndex_FailedAncestorFromSnapshotAfterRestart_ReturnsMachineFriendlyError(t *testing.T) {
+	allowTempDirIndexing(t)
+
 	mc := mocks.NewMockVectorClient(t)
 	sp := mocks.NewMockSplitter(t)
 	cfg := loadTestConfig(t)
@@ -810,6 +905,8 @@ func TestHandleIndex_FailedAncestorFromSnapshotAfterRestart_ReturnsMachineFriend
 }
 
 func TestHandleIndex_AncestorOfInitialWorkingDirectory_ReturnsLLMFriendlyError(t *testing.T) {
+	allowTempDirIndexing(t)
+
 	mc := mocks.NewMockVectorClient(t)
 	sp := mocks.NewMockSplitter(t)
 	cfg := loadTestConfig(t)
@@ -843,6 +940,8 @@ func TestHandleIndex_AncestorOfInitialWorkingDirectory_ReturnsLLMFriendlyError(t
 }
 
 func TestHandleIndex_UsesInitialWorkingDirectoryInsteadOfLiveCwd(t *testing.T) {
+	allowTempDirIndexing(t)
+
 	mc := mocks.NewMockVectorClient(t)
 	sp := mocks.NewMockSplitter(t)
 	cfg := loadTestConfig(t)
@@ -891,6 +990,8 @@ func TestHandleIndex_InitialWorkingDirectoryAncestorRestriction_AllowsSiblingAnd
 		{name: "unrelated", path: "unrelated"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			allowTempDirIndexing(t)
+
 			mc := mocks.NewMockVectorClient(t)
 			sp := mocks.NewMockSplitter(t)
 			cfg := loadTestConfig(t)
@@ -939,6 +1040,8 @@ func TestHandleIndex_InitialWorkingDirectoryAncestorRestriction_AllowsSiblingAnd
 }
 
 func TestHandleIndex_MoveRenameDetectedAtPath_ClearsStaleIndexAndStartsFresh(t *testing.T) {
+	allowTempDirIndexing(t)
+
 	mc := mocks.NewMockVectorClient(t)
 	sp := mocks.NewMockSplitter(t)
 	sm := snapshot.NewManager()
@@ -985,6 +1088,8 @@ func TestHandleIndex_MoveRenameDetectedAtPath_ClearsStaleIndexAndStartsFresh(t *
 }
 
 func TestHandleIndex_MoveRenameDetectedAtManagedAncestor_ClearsStaleIndexAndStartsFresh(t *testing.T) {
+	allowTempDirIndexing(t)
+
 	mc := mocks.NewMockVectorClient(t)
 	sp := mocks.NewMockSplitter(t)
 	sm := snapshot.NewManager()
@@ -1038,6 +1143,8 @@ func TestHandleIndex_MoveRenameDetectedAtManagedAncestor_ClearsStaleIndexAndStar
 }
 
 func TestHandleIndex_StalePersistedIndexingAfterRestart_ResumesIncrementalSync(t *testing.T) {
+	allowTempDirIndexing(t)
+
 	mc := mocks.NewMockVectorClient(t)
 	sp := mocks.NewMockSplitter(t)
 	cfg := loadTestConfig(t)
@@ -1190,6 +1297,8 @@ func TestHandleIndex_AlreadyIndexed_NoReindex_MissingRemoteCollection(t *testing
 }
 
 func TestHandleIndex_AlreadyIndexed_NoReindex_NoChanges_ExplicitSyncReturnsCompletion(t *testing.T) {
+	allowTempDirIndexing(t)
+
 	mc := mocks.NewMockVectorClient(t)
 	sp := mocks.NewMockSplitter(t)
 	sm := snapshot.NewManager()
@@ -1255,6 +1364,8 @@ func TestHandleIndex_AlreadyIndexed_NoReindex_NoChanges_DefaultAsyncStartsInBack
 }
 
 func TestHandleIndex_AlreadyIndexed_NoReindex_AsyncIgnoresRequestCancellation(t *testing.T) {
+	allowTempDirIndexing(t)
+
 	mc := mocks.NewMockVectorClient(t)
 	sp := mocks.NewMockSplitter(t)
 	sm := mocks.NewMockStatusManager(t)
@@ -1333,6 +1444,8 @@ func TestHandleIndex_AlreadyIndexed_NoReindex_AsyncIgnoresRequestCancellation(t 
 }
 
 func TestHandleIndex_AlreadyIndexed_NoReindex_ExplicitSyncReturnsErrorOnFailure(t *testing.T) {
+	allowTempDirIndexing(t)
+
 	mc := mocks.NewMockVectorClient(t)
 	sp := mocks.NewMockSplitter(t)
 	sm := snapshot.NewManager()
@@ -1483,6 +1596,8 @@ func TestHandleIndex_AlreadyIndexed_NoReindex_WithDeletedFile(t *testing.T) {
 }
 
 func TestHandleIndex_AlreadyIndexed_NoReindex_WithSyncMgr(t *testing.T) {
+	allowTempDirIndexing(t)
+
 	// Covers the syncMgr.TrackPath branch in incrementalIndex.
 	mc := mocks.NewMockVectorClient(t)
 	sm := mocks.NewMockStatusManager(t)
@@ -3284,6 +3399,8 @@ func TestHandleClear_WithSyncMgr(t *testing.T) {
 }
 
 func TestHandleClear_CancelsActiveIndexForSamePath(t *testing.T) {
+	allowTempDirIndexing(t)
+
 	mc := mocks.NewMockVectorClient(t)
 	sp := mocks.NewMockSplitter(t)
 	sm := snapshot.NewManager()
@@ -3363,6 +3480,8 @@ func TestHandleClear_SharedSnapshotWorkerStopsTreatingPathAsIndexed(t *testing.T
 }
 
 func TestHandleIndex_Reindex_SharedSnapshotWorkerStopsTreatingPathAsIndexed(t *testing.T) {
+	allowTempDirIndexing(t)
+
 	mc := mocks.NewMockVectorClient(t)
 	sp := mocks.NewMockSplitter(t)
 	cfg := loadTestConfig(t)
@@ -4558,6 +4677,8 @@ func TestHandleIndex_IncrementalIndex_LoadHashMapReadError(t *testing.T) {
 }
 
 func TestHandleIndex_RepairPathMismatchClearError(t *testing.T) {
+	allowTempDirIndexing(t)
+
 	mc := mocks.NewMockVectorClient(t)
 	sp := mocks.NewMockSplitter(t)
 	sm := snapshot.NewManager()

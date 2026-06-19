@@ -63,28 +63,35 @@ func TestNew_PathPropertiesDescribeStableScopeConstraints(t *testing.T) {
 		property string
 		required bool
 		typeName string
-		contains []string
+		want     string
 	}{
 		{
 			tool:     "index_codebase",
 			property: "path",
 			required: true,
 			typeName: "string",
-			contains: []string{"working directory", "ignore-file handling", "status tracking"},
+			want:     "Absolute path to the codebase root to index. Hint: Use your current working directory if unsure.",
 		},
 		{
 			tool:     "search_code",
 			property: "path",
 			required: true,
 			typeName: "string",
-			contains: []string{"indexed codebase root", "subdirectory", "indexed ancestor"},
+			want:     "Absolute path to an indexed codebase root or subdirectory. Hint: Use your current working directory if unsure.",
+		},
+		{
+			tool:     "clear_index",
+			property: "path",
+			required: true,
+			typeName: "string",
+			want:     "Absolute path to an indexed codebase root. Hint: Use your current working directory if unsure.",
 		},
 		{
 			tool:     "get_indexing_status",
 			property: "path",
 			required: true,
 			typeName: "string",
-			contains: []string{"codebase or a subdirectory", "nearest managed ancestor"},
+			want:     "Absolute path to a codebase root or subdirectory. Hint: Use your current working directory if unsure.",
 		},
 	}
 
@@ -95,13 +102,14 @@ func TestNew_PathPropertiesDescribeStableScopeConstraints(t *testing.T) {
 			property, ok := properties[tc.property].(map[string]any)
 			require.True(t, ok, "tool %q missing property %q", tc.tool, tc.property)
 			assert.Equal(t, tc.typeName, property["type"])
+			assert.Equal(t, tc.want, toolPropertyDescription(t, s, tc.tool, tc.property))
+			assert.NotContains(t, toolPropertyDescription(t, s, tc.tool, tc.property), "Defaults to")
 
-			for _, fragment := range tc.contains {
-				assert.Contains(t, toolPropertyDescription(t, s, tc.tool, tc.property), fragment)
-			}
-
+			requiredProperties := toolRequiredProperties(t, s, tc.tool)
 			if tc.required {
-				assert.Contains(t, toolRequiredProperties(t, s, tc.tool), tc.property)
+				assert.Contains(t, requiredProperties, tc.property)
+			} else {
+				assert.NotContains(t, requiredProperties, tc.property)
 			}
 		})
 	}

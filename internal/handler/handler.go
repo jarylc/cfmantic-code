@@ -37,6 +37,7 @@ var likePatternBackslashEscaper = strings.NewReplacer(`\`, `\\`)
 
 var (
 	validateStoredPath        = snapshot.ValidateStoredPath
+	validateIndexPath         = validateIndexPathNotTemporary
 	buildRelativePathFilterFn = buildRelativePathFilter
 )
 
@@ -122,6 +123,10 @@ func (h *Handler) HandleIndex(ctx context.Context, req mcp.CallToolRequest) (*mc
 
 	path, err = canonicalizePath(path)
 	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	if err := validateIndexPath(path); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 
@@ -643,6 +648,81 @@ func canonicalizePath(rawPath string) (string, error) {
 	return CanonicalizePath(rawPath)
 }
 
+func validateIndexPathNotTemporary(path string) error {
+	if isTemporaryDirectoryPath(path) {
+		return temporaryDirectoryIndexError{path: path}
+	}
+
+	return nil
+}
+
+type temporaryDirectoryIndexError struct {
+	path string
+}
+
+func (err temporaryDirectoryIndexError) Error() string {
+	return formatTempDirError(err.path)
+}
+
+func formatTempDirError(path string) string {
+	return fmt.Sprintf("cannot index temporary directory %q because temporary files may be deleted and leave orphaned indexes; choose a persistent project directory", path)
+}
+
+func isTemporaryDirectoryPath(path string) bool {
+	for _, root := range temporaryDirectoryRoots() {
+		if path == root || isStrictAncestorPath(root, path) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func temporaryDirectoryRoots() []string {
+	rawRoots := []string{os.TempDir()}
+	if os.PathSeparator == '/' {
+		rawRoots = append(rawRoots, "/tmp")
+	}
+
+	roots := make([]string, 0, len(rawRoots))
+	seen := make(map[string]struct{}, len(rawRoots))
+
+	for _, rawRoot := range rawRoots {
+		root, ok := canonicalTemporaryRoot(rawRoot)
+		if !ok {
+			continue
+		}
+
+		if _, exists := seen[root]; exists {
+			continue
+		}
+
+		seen[root] = struct{}{}
+		roots = append(roots, root)
+	}
+
+	return roots
+}
+
+func canonicalTemporaryRoot(root string) (string, bool) {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return "", false
+	}
+
+	canonical, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", false
+	}
+
+	info, err := os.Stat(canonical)
+	if err != nil || !info.IsDir() {
+		return "", false
+	}
+
+	return filepath.Clean(canonical), true
+}
+
 func resolveInitialWorkingDirectory(canonicalize func(string) (string, error)) string {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -998,7 +1078,7 @@ func (h *Handler) incrementalIndex(ctx context.Context, path string, ignorePatte
 }
 
 func (h *Handler) startManualIndex(parent context.Context, path string) (context.Context, func()) {
-	ctx, cancel := context.WithCancel(parent) //nolint:gosec // cancel is retained for clear_index and deferred run cleanup
+	ctx, cancel := context.WithCancel(parent)
 	active := &activeManualIndex{
 		cancel: cancel,
 		done:   make(chan struct{}),

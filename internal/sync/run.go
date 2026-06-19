@@ -4,6 +4,7 @@ import (
 	"cfmantic-code/internal/runtimeutil"
 	"cfmantic-code/internal/snapshot"
 	"cfmantic-code/internal/walker"
+	"errors"
 )
 
 var (
@@ -311,7 +312,7 @@ func deleteDeletedFiles(diff *ManifestDiff, deleteFile func(string) error) error
 		}
 
 		if err := deleteFile(change.RelPath); err != nil {
-			deleteErr = err
+			deleteErr = errors.Join(deleteErr, err)
 		}
 	}
 
@@ -361,7 +362,7 @@ func deleteModifiedFileChunks(
 				batchSize := min(len(staleIDs), maxDeleteChunkIDsPerRequest)
 
 				if err := deleteChunkIDs(staleIDs[:batchSize]); err != nil {
-					deleteErr = err
+					deleteErr = errors.Join(deleteErr, err)
 				}
 
 				staleIDs = staleIDs[batchSize:]
@@ -372,7 +373,7 @@ func deleteModifiedFileChunks(
 
 		for _, id := range staleIDs {
 			if err := deleteChunkID(id); err != nil {
-				deleteErr = err
+				deleteErr = errors.Join(deleteErr, err)
 			}
 		}
 	}

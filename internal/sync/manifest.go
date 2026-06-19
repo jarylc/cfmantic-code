@@ -82,7 +82,6 @@ func ComputeManifestDiff(files []walker.CodeFile, old *FileHashMap) *ManifestDif
 	}
 
 	manifest := NewFileHashMap()
-	changes := make([]FileChange, 0)
 
 	for _, f := range files {
 		oldEntry, exists := old.Files[f.RelPath]
@@ -105,25 +104,9 @@ func ComputeManifestDiff(files []walker.CodeFile, old *FileHashMap) *ManifestDif
 		}
 
 		manifest.Files[f.RelPath] = entry
-
-		if !exists {
-			changes = append(changes, FileChange{RelPath: f.RelPath, Type: Added})
-		} else if entry.Hash != oldEntry.Hash {
-			changes = append(changes, FileChange{RelPath: f.RelPath, Type: Modified})
-		}
 	}
 
-	for relPath := range old.Files {
-		if _, exists := manifest.Files[relPath]; !exists {
-			changes = append(changes, FileChange{RelPath: relPath, Type: Deleted})
-		}
-	}
-
-	sort.Slice(changes, func(i, j int) bool {
-		return changes[i].RelPath < changes[j].RelPath
-	})
-
-	return &ManifestDiff{Manifest: manifest, Changes: changes}
+	return &ManifestDiff{Manifest: manifest, Changes: diffFileHashMaps(manifest, old)}
 }
 
 func computeFileEntry(file walker.CodeFile) (FileEntry, bool) {
@@ -162,7 +145,23 @@ func IsFileFresh(filePath string, entry FileEntry) (bool, error) {
 		return false, fmt.Errorf("stat file freshness: %w", err)
 	}
 
-	return sameFileMetadata(entry, info.Size(), info.ModTime().UnixNano()), nil
+	size := info.Size()
+
+	modTimeUnixNano := info.ModTime().UnixNano()
+	if sameFileMetadata(entry, size, modTimeUnixNano) {
+		return true, nil
+	}
+
+	if entry.Size != size {
+		return false, nil
+	}
+
+	hash, err := hashFile(filePath)
+	if err != nil {
+		return false, fmt.Errorf("hash file freshness: %w", err)
+	}
+
+	return hash == entry.Hash, nil
 }
 
 func hashFile(filePath string) (string, error) {
@@ -183,13 +182,21 @@ func hashFile(filePath string) (string, error) {
 // Diff compares the receiver (new state) against old and returns a
 // sorted, deterministic list of changes.
 func (m *FileHashMap) Diff(old *FileHashMap) []FileChange {
+	return diffFileHashMaps(m, old)
+}
+
+func diffFileHashMaps(newMap, old *FileHashMap) []FileChange {
+	if newMap == nil {
+		newMap = NewFileHashMap()
+	}
+
 	if old == nil {
 		old = NewFileHashMap()
 	}
 
 	var changes []FileChange
 
-	for relPath, newEntry := range m.Files {
+	for relPath, newEntry := range newMap.Files {
 		oldEntry, exists := old.Files[relPath]
 		if !exists {
 			changes = append(changes, FileChange{RelPath: relPath, Type: Added})
@@ -199,7 +206,7 @@ func (m *FileHashMap) Diff(old *FileHashMap) []FileChange {
 	}
 
 	for relPath := range old.Files {
-		if _, exists := m.Files[relPath]; !exists {
+		if _, exists := newMap.Files[relPath]; !exists {
 			changes = append(changes, FileChange{RelPath: relPath, Type: Deleted})
 		}
 	}

@@ -1,9 +1,11 @@
 package snapshot
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -463,6 +465,55 @@ func TestSetStep(t *testing.T) {
 	})
 }
 
+func TestNonTerminalUpdatesLogPersistenceFailures(t *testing.T) {
+	tests := []struct {
+		name   string
+		update func(*Manager, string)
+		want   string
+	}{
+		{
+			name: "set step",
+			update: func(m *Manager, dir string) {
+				m.SetStep(dir, "scanning")
+			},
+			want: "snapshot: failed to persist step update",
+		},
+		{
+			name: "set progress",
+			update: func(m *Manager, dir string) {
+				m.SetProgress(dir, Progress{FilesDone: 1, FilesTotal: 2})
+			},
+			want: "snapshot: failed to persist progress update",
+		},
+		{
+			name: "start operation",
+			update: func(m *Manager, dir string) {
+				m.StartOperation(dir, OperationMetadata{Operation: "indexing"})
+			},
+			want: "snapshot: failed to persist operation start",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			conflict := filepath.Join(MetadataDirPath(dir), "state.json.tmp")
+			require.NoError(t, os.MkdirAll(conflict, 0o755))
+
+			var logs bytes.Buffer
+
+			oldOutput := log.Writer()
+
+			log.SetOutput(&logs)
+			t.Cleanup(func() { log.SetOutput(oldOutput) })
+
+			tt.update(NewManager(), dir)
+
+			assert.Contains(t, logs.String(), tt.want)
+		})
+	}
+}
+
 func TestStartOperation_TracksMetadataAndFreshness(t *testing.T) {
 	dir := t.TempDir()
 	m := NewManager()
@@ -888,6 +939,56 @@ func TestResolve_RefreshesExistingCacheFromDisk(t *testing.T) {
 	require.NotNil(t, info)
 	assert.Equal(t, StatusIndexing, info.Status)
 	assert.Equal(t, "running", info.Step)
+}
+
+func TestResolve_UsesCachedStateUntilMTimeChanges(t *testing.T) {
+	dir := t.TempDir()
+	firstMTime := time.Date(2026, time.March, 7, 12, 0, 0, 0, time.UTC)
+	secondMTime := firstMTime.Add(time.Hour)
+
+	writeStateFileWithMTime(t, dir, &CodebaseInfo{
+		Path:        dir,
+		Status:      StatusIndexed,
+		LastUpdated: firstMTime,
+	}, firstMTime)
+
+	oldRead := readStateFile
+	reads := 0
+	readStateFile = func(name string) ([]byte, error) {
+		reads++
+
+		return oldRead(name)
+	}
+
+	t.Cleanup(func() { readStateFile = oldRead })
+
+	m := NewManager()
+	assert.Equal(t, StatusIndexed, m.GetStatus(dir))
+	assert.Equal(t, StatusIndexed, m.GetStatus(dir))
+	assert.Equal(t, 1, reads)
+
+	writeStateFileWithMTime(t, dir, &CodebaseInfo{
+		Path:         dir,
+		Status:       StatusFailed,
+		ErrorMessage: "boom",
+		LastUpdated:  secondMTime,
+	}, secondMTime)
+
+	assert.Equal(t, StatusFailed, m.GetStatus(dir))
+	assert.Equal(t, 2, reads)
+}
+
+func writeStateFileWithMTime(t *testing.T, dir string, info *CodebaseInfo, mtime time.Time) {
+	t.Helper()
+
+	require.NoError(t, os.MkdirAll(MetadataDirPath(dir), 0o755))
+
+	data, err := json.Marshal(info)
+	require.NoError(t, err)
+
+	fp := stateFilePath(dir)
+	require.NoError(t, os.WriteFile(fp, data, 0o644))
+	require.NoError(t, os.Chtimes(fp, mtime, mtime))
 }
 
 // ============================================================

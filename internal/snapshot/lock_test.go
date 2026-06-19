@@ -65,6 +65,15 @@ func TestHasActiveLock(t *testing.T) {
 		assert.True(t, HasActiveLock(dir))
 	})
 
+	t.Run("live process with stale lock file", func(t *testing.T) {
+		dir := t.TempDir()
+		writeLockInfoFile(t, dir, lockInfo{PID: os.Getpid(), StartedAt: time.Now()})
+		staleTime := time.Now().Add(-(lockStaleAfter + time.Minute))
+		require.NoError(t, os.Chtimes(LockFilePath(dir), staleTime, staleTime))
+
+		assert.False(t, HasActiveLock(dir))
+	})
+
 	t.Run("dead process", func(t *testing.T) {
 		dir := t.TempDir()
 		writeLockInfoFile(t, dir, lockInfo{PID: 99999999, StartedAt: time.Now()})
@@ -101,6 +110,19 @@ func TestAcquireLock_LiveProcessIgnoresAge(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, release)
 	assert.Contains(t, err.Error(), fmt.Sprintf("locked by PID %d", os.Getpid()))
+}
+
+func TestAcquireLock_LiveProcessWithStaleLockFile(t *testing.T) {
+	dir := t.TempDir()
+	writeLockInfoFile(t, dir, lockInfo{PID: os.Getpid(), StartedAt: time.Now()})
+	staleTime := time.Now().Add(-(lockStaleAfter + time.Minute))
+	require.NoError(t, os.Chtimes(LockFilePath(dir), staleTime, staleTime))
+
+	release, err := AcquireLock(dir)
+	require.NoError(t, err)
+	require.NotNil(t, release)
+
+	release()
 }
 
 func TestAcquireLock_DeadProcess(t *testing.T) {

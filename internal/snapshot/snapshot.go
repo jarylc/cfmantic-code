@@ -30,7 +30,11 @@ const (
 // moved or renamed after indexing.
 var ErrStoredPathMismatch = errors.New("stored snapshot path mismatch")
 
-var marshalState = json.MarshalIndent
+var (
+	marshalState  = json.MarshalIndent
+	readStateFile = os.ReadFile
+	statStateFile = os.Stat
+)
 
 // StoredPathMismatchError describes a state file whose persisted codebase root
 // no longer matches the canonical path where it was found.
@@ -103,18 +107,25 @@ type IgnorePatternReader interface {
 // Manager manages persistent indexing state across codebases.
 // State is stored per-codebase at <codebasePath>/.cfmantic/state.json.
 type Manager struct {
-	mu        sync.RWMutex
-	codebases map[string]*CodebaseInfo // in-memory cache, keyed by absolute path
-	observers []Observer
-	now       func() time.Time
+	mu         sync.RWMutex
+	codebases  map[string]*CodebaseInfo // in-memory cache, keyed by absolute path
+	stateFiles map[string]stateFileCache
+	observers  []Observer
+	now        func() time.Time
+}
+
+type stateFileCache struct {
+	modTime time.Time
+	info    *CodebaseInfo
 }
 
 // NewManager creates a Manager with an empty in-memory cache.
 // State is lazily loaded from each codebase's .cfmantic/state.json on first access.
 func NewManager() *Manager {
 	return &Manager{
-		codebases: make(map[string]*CodebaseInfo),
-		now:       time.Now,
+		codebases:  make(map[string]*CodebaseInfo),
+		stateFiles: make(map[string]stateFileCache),
+		now:        time.Now,
 	}
 }
 
@@ -137,7 +148,7 @@ func stateFilePath(codebasePath string) string {
 // loadFromDisk reads a single codebase's state from its .cfmantic/state.json.
 // Returns nil if the file doesn't exist or can't be parsed.
 func loadFromDisk(path string) *CodebaseInfo {
-	data, err := os.ReadFile(stateFilePath(path))
+	data, err := readStateFile(stateFilePath(path))
 	if err != nil {
 		return nil
 	}
@@ -221,7 +232,10 @@ func (m *Manager) SetStep(path, step string) {
 	info.ErrorMessage = ""
 	m.mu.Unlock()
 
-	ignoreError(m.saveToDisk(path))
+	if err := m.saveToDisk(path); err != nil {
+		logPersistenceError("step update", path, err)
+	}
+
 	m.emit(path, EventStepUpdated)
 }
 
@@ -252,7 +266,10 @@ func (m *Manager) SetProgress(path string, progress Progress) {
 
 	m.mu.Unlock()
 
-	ignoreError(m.saveToDisk(path))
+	if err := m.saveToDisk(path); err != nil {
+		logPersistenceError("progress update", path, err)
+	}
+
 	m.emit(path, EventProgressUpdated)
 }
 
@@ -285,7 +302,10 @@ func (m *Manager) StartOperation(path string, meta OperationMetadata) {
 
 	m.mu.Unlock()
 
-	ignoreError(m.saveToDisk(path))
+	if err := m.saveToDisk(path); err != nil {
+		logPersistenceError("operation start", path, err)
+	}
+
 	m.emit(path, EventOperationStarted)
 }
 
@@ -341,7 +361,9 @@ func (m *Manager) SetIgnorePatterns(path string, patterns []string) {
 
 	m.mu.Unlock()
 
-	ignoreError(m.saveToDisk(path))
+	if err := m.saveToDisk(path); err != nil {
+		logPersistenceError("ignore pattern update", path, err)
+	}
 }
 
 // GetIgnorePatterns returns persisted ignore patterns for a codebase when available.
@@ -388,6 +410,7 @@ func (m *Manager) SetFailed(path, errMsg string) {
 func (m *Manager) Remove(path string) {
 	m.mu.Lock()
 	delete(m.codebases, path)
+	delete(m.stateFiles, path)
 	m.mu.Unlock()
 
 	os.Remove(stateFilePath(path)) //nolint:gosec // G104: best-effort cleanup
@@ -438,7 +461,9 @@ func (m *Manager) clearUnsavedTerminalFailure(path string) {
 	m.mu.Unlock()
 }
 
-func ignoreError(error) {}
+func logPersistenceError(action, path string, err error) {
+	log.Printf("snapshot: failed to persist %s for %s: %v", action, path, err)
+}
 
 // saveToDisk writes a single codebase's state to its .cfmantic/state.json atomically and returns any error.
 func (m *Manager) saveToDisk(path string) error {
@@ -450,7 +475,8 @@ func (m *Manager) saveToDisk(path string) error {
 		return nil
 	}
 
-	data, err := marshalState(info, "", "  ")
+	state := cloneCodebaseInfo(info)
+	data, err := marshalState(state, "", "  ")
 
 	m.mu.RUnlock()
 
@@ -483,6 +509,13 @@ func (m *Manager) saveToDisk(path string) error {
 		log.Printf("snapshot: %v", err)
 
 		return err
+	}
+
+	state.unsavedTerminalFailure = false
+	if fileInfo, err := statStateFile(fp); err == nil {
+		m.cacheState(path, fileInfo.ModTime(), state)
+	} else {
+		m.clearStateCache(path)
 	}
 
 	m.clearUnsavedTerminalFailure(path)
@@ -520,7 +553,7 @@ func (m *Manager) emit(path string, eventType EventType) {
 // resolve ensures the codebase at path is loaded into the in-memory cache.
 // Must be called without holding the lock.
 func (m *Manager) resolve(path string) {
-	info := loadFromDisk(path)
+	info := m.loadCachedFromDisk(path)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -541,6 +574,69 @@ func (m *Manager) resolve(path string) {
 	}
 
 	m.codebases[path] = info
+}
+
+func (m *Manager) loadCachedFromDisk(path string) *CodebaseInfo {
+	fileInfo, err := statStateFile(stateFilePath(path))
+	if err != nil {
+		m.clearStateCache(path)
+
+		return nil
+	}
+
+	modTime := fileInfo.ModTime()
+
+	m.mu.RLock()
+
+	cached, ok := m.stateFiles[path]
+	if ok && cached.modTime.Equal(modTime) {
+		info := cloneCodebaseInfo(cached.info)
+
+		m.mu.RUnlock()
+
+		return info
+	}
+
+	m.mu.RUnlock()
+
+	info := loadFromDisk(path)
+	if info == nil {
+		m.cacheState(path, modTime, nil)
+
+		return nil
+	}
+
+	m.cacheState(path, modTime, info)
+
+	return info
+}
+
+func (m *Manager) cacheState(path string, modTime time.Time, info *CodebaseInfo) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.stateFiles == nil {
+		m.stateFiles = make(map[string]stateFileCache)
+	}
+
+	m.stateFiles[path] = stateFileCache{modTime: modTime, info: cloneCodebaseInfo(info)}
+}
+
+func (m *Manager) clearStateCache(path string) {
+	m.mu.Lock()
+	delete(m.stateFiles, path)
+	m.mu.Unlock()
+}
+
+func cloneCodebaseInfo(info *CodebaseInfo) *CodebaseInfo {
+	if info == nil {
+		return nil
+	}
+
+	copied := *info
+	copied.IgnorePatterns = cloneStringSlicePtr(info.IgnorePatterns)
+
+	return &copied
 }
 
 func cloneStrings(values []string) []string {

@@ -8,6 +8,7 @@
 
 ## Hazards
 - Milvus-facing changes are cross-project changes: this repo talks to a custom Milvus-compatible Cloudflare Worker backend, so client/API changes must stay in lockstep with that worker.
+- Oversized entity splitting uses JSON payload bytes as the source of truth, not rune count; multi-byte UTF-8 means rune count underestimates payload size.
 - If testing the built binary instead of `go run .`, rebuild first; stale `bin/cfmantic-code` is a common false signal.
 - Prefer mockery-generated mocks from `internal/mocks`; if a mock is missing, update `.mockery.yml` and regenerate instead of adding package-local handwritten test mocks.
 

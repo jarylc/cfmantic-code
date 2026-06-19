@@ -2,6 +2,7 @@ package pipeline_test
 
 import (
 	"cfmantic-code/internal/milvus"
+	"cfmantic-code/internal/mocks"
 	"cfmantic-code/internal/pipeline"
 	"cfmantic-code/internal/splitter"
 	"cfmantic-code/internal/walker"
@@ -9,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,60 +21,6 @@ import (
 	testifymock "github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
-
-type mockVectorClient struct {
-	testifymock.Mock
-}
-
-func mockError(args testifymock.Arguments, index int) error {
-	if got := args.Get(index); got != nil {
-		err, _ := got.(error)
-		return err
-	}
-
-	return nil
-}
-
-func newMockVectorClient(t *testing.T) *mockVectorClient {
-	t.Helper()
-
-	mock := &mockVectorClient{}
-
-	t.Cleanup(func() {
-		mock.AssertExpectations(t)
-	})
-
-	return mock
-}
-
-func (m *mockVectorClient) Insert(ctx context.Context, collection string, entities []milvus.Entity) (*milvus.InsertResult, error) {
-	args := m.Called(ctx, collection, entities)
-	result, _ := args.Get(0).(*milvus.InsertResult)
-
-	return result, mockError(args, 1)
-}
-
-type mockSplitter struct {
-	testifymock.Mock
-}
-
-func newMockSplitter(t *testing.T) *mockSplitter {
-	t.Helper()
-
-	mock := &mockSplitter{}
-
-	t.Cleanup(func() {
-		mock.AssertExpectations(t)
-	})
-
-	return mock
-}
-
-func (m *mockSplitter) Split(reader io.Reader, filePath string, emit splitter.EmitChunkFunc) error {
-	args := m.Called(reader, filePath, emit)
-
-	return mockError(args, 0)
-}
 
 // makeFile creates a real file with the given content in t.TempDir() and returns a CodeFile.
 func makeFile(t *testing.T, dir, name, content string) walker.CodeFile {
@@ -98,7 +44,7 @@ func baseConfig(collection, codebasePath string) pipeline.Config {
 	}
 }
 
-func expectSplit(tb testing.TB, sp *mockSplitter, filePath any, chunks []splitter.Chunk) {
+func expectSplit(tb testing.TB, sp *mocks.MockSplitter, filePath any, chunks []splitter.Chunk) {
 	tb.Helper()
 
 	sp.On("Split", testifymock.Anything, filePath, testifymock.Anything).
@@ -113,7 +59,7 @@ func expectSplit(tb testing.TB, sp *mockSplitter, filePath any, chunks []splitte
 		Return(nil)
 }
 
-func expectSplitError(sp *mockSplitter, filePath any, err error) {
+func expectSplitError(sp *mocks.MockSplitter, filePath any, err error) {
 	sp.On("Split", testifymock.Anything, filePath, testifymock.Anything).Return(err)
 }
 
@@ -121,8 +67,8 @@ func expectSplitError(sp *mockSplitter, filePath any, err error) {
 
 func TestRun_FlushRemainingBatch(t *testing.T) {
 	dir := t.TempDir()
-	mc := newMockVectorClient(t)
-	sp := newMockSplitter(t)
+	mc := mocks.NewMockInserter(t)
+	sp := mocks.NewMockSplitter(t)
 
 	chunk := splitter.Chunk{Content: "hello", StartLine: 1, EndLine: 1}
 	expectSplit(t, sp, "main.go", []splitter.Chunk{chunk})
@@ -142,8 +88,8 @@ func TestRun_FlushRemainingBatch(t *testing.T) {
 
 func TestRun_BatchLoopInsert(t *testing.T) {
 	dir := t.TempDir()
-	mc := newMockVectorClient(t)
-	sp := newMockSplitter(t)
+	mc := mocks.NewMockInserter(t)
+	sp := mocks.NewMockSplitter(t)
 
 	chunk1 := splitter.Chunk{Content: "chunk1", StartLine: 1, EndLine: 1}
 	chunk2 := splitter.Chunk{Content: "chunk2", StartLine: 2, EndLine: 2}
@@ -172,8 +118,8 @@ func TestRun_BatchLoopInsert(t *testing.T) {
 
 func TestRun_InsertError(t *testing.T) {
 	dir := t.TempDir()
-	mc := newMockVectorClient(t)
-	sp := newMockSplitter(t)
+	mc := mocks.NewMockInserter(t)
+	sp := mocks.NewMockSplitter(t)
 
 	chunks := []splitter.Chunk{
 		{Content: "x1", StartLine: 1, EndLine: 1},
@@ -208,8 +154,8 @@ func TestRun_InsertError(t *testing.T) {
 
 func TestRun_SplitError(t *testing.T) {
 	dir := t.TempDir()
-	mc := newMockVectorClient(t)
-	sp := newMockSplitter(t)
+	mc := mocks.NewMockInserter(t)
+	sp := mocks.NewMockSplitter(t)
 
 	expectSplitError(sp, "broken.go", errors.New("split failed"))
 
@@ -246,8 +192,8 @@ func TestRun_SplitError(t *testing.T) {
 
 func TestRun_SendResultCanceledAfterConcurrentStop(t *testing.T) {
 	dir := t.TempDir()
-	mc := newMockVectorClient(t)
-	sp := newMockSplitter(t)
+	mc := mocks.NewMockInserter(t)
+	sp := mocks.NewMockSplitter(t)
 
 	insertCtxDone := make(chan (<-chan struct{}), 1)
 
@@ -292,8 +238,8 @@ func TestRun_SendResultCanceledAfterConcurrentStop(t *testing.T) {
 
 func TestRun_EmptyChunkResultReturnsQuietlyAfterConcurrentStop(t *testing.T) {
 	dir := t.TempDir()
-	mc := newMockVectorClient(t)
-	sp := newMockSplitter(t)
+	mc := mocks.NewMockInserter(t)
+	sp := mocks.NewMockSplitter(t)
 
 	insertCtxDone := make(chan (<-chan struct{}), 1)
 
@@ -341,8 +287,8 @@ func TestRun_EmptyChunkResultReturnsQuietlyAfterConcurrentStop(t *testing.T) {
 
 func TestRun_StopBeforeFileDoneResultReturnsInsertError(t *testing.T) {
 	dir := t.TempDir()
-	mc := newMockVectorClient(t)
-	sp := newMockSplitter(t)
+	mc := mocks.NewMockInserter(t)
+	sp := mocks.NewMockSplitter(t)
 
 	insertCtxDone := make(chan (<-chan struct{}), 1)
 
@@ -389,8 +335,8 @@ func TestRun_StopBeforeFileDoneResultReturnsInsertError(t *testing.T) {
 
 func TestRun_StopBeforeFileDoneResultKeepsConcurrentLaterFilesIncomplete(t *testing.T) {
 	dir := t.TempDir()
-	mc := newMockVectorClient(t)
-	sp := newMockSplitter(t)
+	mc := mocks.NewMockInserter(t)
+	sp := mocks.NewMockSplitter(t)
 
 	insertCtxDone := make(chan (<-chan struct{}), 1)
 	firstEmitDone := make(chan struct{})
@@ -456,8 +402,8 @@ func TestRun_StopBeforeFileDoneResultKeepsConcurrentLaterFilesIncomplete(t *test
 // ─── Run: empty files list ────────────────────────────────────────────────────
 
 func TestRun_EmptyFiles(t *testing.T) {
-	mc := newMockVectorClient(t)
-	sp := newMockSplitter(t)
+	mc := mocks.NewMockInserter(t)
+	sp := mocks.NewMockSplitter(t)
 
 	cfg := baseConfig("col", "/some/path")
 
@@ -472,8 +418,8 @@ func TestRun_EmptyFiles(t *testing.T) {
 
 func TestRun_OnResultsDrainedCalled(t *testing.T) {
 	dir := t.TempDir()
-	mc := newMockVectorClient(t)
-	sp := newMockSplitter(t)
+	mc := mocks.NewMockInserter(t)
+	sp := mocks.NewMockSplitter(t)
 
 	chunk := splitter.Chunk{Content: "y", StartLine: 1, EndLine: 1}
 	expectSplit(t, sp, testifymock.Anything, []splitter.Chunk{chunk})
@@ -501,8 +447,8 @@ func TestRun_OnResultsDrainedCalled(t *testing.T) {
 
 func TestRun_UnreadableFileReturnsError(t *testing.T) {
 	dir := t.TempDir()
-	mc := newMockVectorClient(t)
-	sp := newMockSplitter(t)
+	mc := mocks.NewMockInserter(t)
+	sp := mocks.NewMockSplitter(t)
 
 	var laterSplitCalled atomic.Bool
 
@@ -544,8 +490,8 @@ func TestRun_EmptyChunksSkipped(t *testing.T) {
 	// Splitter returns an empty slice — worker continues without sending a result.
 	// No insert should occur and TotalChunks must be zero.
 	dir := t.TempDir()
-	mc := newMockVectorClient(t)
-	sp := newMockSplitter(t)
+	mc := mocks.NewMockInserter(t)
+	sp := mocks.NewMockSplitter(t)
 
 	expectSplit(t, sp, "empty.go", []splitter.Chunk{})
 
@@ -563,8 +509,8 @@ func TestRun_EmptyChunksSkipped(t *testing.T) {
 
 func TestRunOnProgressCalled(t *testing.T) {
 	dir := t.TempDir()
-	mc := newMockVectorClient(t)
-	sp := newMockSplitter(t)
+	mc := mocks.NewMockInserter(t)
+	sp := mocks.NewMockSplitter(t)
 
 	type progressSnapshot struct {
 		filesDone      int
@@ -628,8 +574,8 @@ func TestRunOnProgressCalled(t *testing.T) {
 
 func TestRunOnFileIndexedCallback(t *testing.T) {
 	dir := t.TempDir()
-	mc := newMockVectorClient(t)
-	sp := newMockSplitter(t)
+	mc := mocks.NewMockInserter(t)
+	sp := mocks.NewMockSplitter(t)
 
 	chunk := splitter.Chunk{Content: "x", StartLine: 1, EndLine: 1}
 	expectSplit(t, sp, "a.go", []splitter.Chunk{chunk})
@@ -683,8 +629,8 @@ func TestRunPartialFailure_CompletedFiles(t *testing.T) {
 	// 1 file with 2 chunks, batchSize=1: first insert succeeds, second fails.
 	// Since only 1/2 chunks inserted, the file is NOT complete.
 	dir := t.TempDir()
-	mc := newMockVectorClient(t)
-	sp := newMockSplitter(t)
+	mc := mocks.NewMockInserter(t)
+	sp := mocks.NewMockSplitter(t)
 
 	chunk1 := splitter.Chunk{Content: "chunk1", StartLine: 1, EndLine: 1}
 	chunk2 := splitter.Chunk{Content: "chunk2", StartLine: 2, EndLine: 2}
@@ -714,8 +660,8 @@ func TestRunPartialFailure_CompletedFiles(t *testing.T) {
 
 func TestRun_FileChunkIDsDisabledByDefault(t *testing.T) {
 	dir := t.TempDir()
-	mc := newMockVectorClient(t)
-	sp := newMockSplitter(t)
+	mc := mocks.NewMockInserter(t)
+	sp := mocks.NewMockSplitter(t)
 
 	chunk := splitter.Chunk{Content: "x", StartLine: 1, EndLine: 1}
 	expectSplit(t, sp, "main.go", []splitter.Chunk{chunk})
@@ -737,8 +683,8 @@ func TestRun_FileChunkIDsDisabledByDefault(t *testing.T) {
 
 func TestRun_CollectFileChunkIDsWhenEnabled(t *testing.T) {
 	dir := t.TempDir()
-	mc := newMockVectorClient(t)
-	sp := newMockSplitter(t)
+	mc := mocks.NewMockInserter(t)
+	sp := mocks.NewMockSplitter(t)
 
 	chunk := splitter.Chunk{Content: "x", StartLine: 1, EndLine: 1}
 	expectSplit(t, sp, "a.go", []splitter.Chunk{chunk})
@@ -828,8 +774,8 @@ func TestBuildEntity_MetadataContainsCodebasePath(t *testing.T) {
 
 func TestRun_BelowPayloadLimitChunkRemainsUnchanged(t *testing.T) {
 	dir := t.TempDir()
-	mc := newMockVectorClient(t)
-	sp := newMockSplitter(t)
+	mc := mocks.NewMockInserter(t)
+	sp := mocks.NewMockSplitter(t)
 
 	chunk := splitter.Chunk{Content: "alpha\nbeta\ngamma", StartLine: 10, EndLine: 12}
 	expectSplit(t, sp, "main.go", []splitter.Chunk{chunk})
@@ -862,8 +808,8 @@ func TestRun_BelowPayloadLimitChunkRemainsUnchanged(t *testing.T) {
 
 func TestRun_OversizedChunkIsSplitWithinPayloadLimit(t *testing.T) {
 	dir := t.TempDir()
-	mc := newMockVectorClient(t)
-	sp := newMockSplitter(t)
+	mc := mocks.NewMockInserter(t)
+	sp := mocks.NewMockSplitter(t)
 
 	content := makeLargeChunkContent(90, 140)
 	chunk := splitter.Chunk{Content: content, StartLine: 40, EndLine: 129}
@@ -907,8 +853,8 @@ func TestRun_OversizedChunkIsSplitWithinPayloadLimit(t *testing.T) {
 
 func TestRun_SingleLineOversizedChunkIsSplitWithinPayloadLimit(t *testing.T) {
 	dir := t.TempDir()
-	mc := newMockVectorClient(t)
-	sp := newMockSplitter(t)
+	mc := mocks.NewMockInserter(t)
+	sp := mocks.NewMockSplitter(t)
 
 	content := makeJSONLikeSingleLineContent(16_000)
 	chunk := splitter.Chunk{Content: content, StartLine: 7, EndLine: 7}
@@ -945,8 +891,8 @@ func TestRun_SingleLineOversizedChunkIsSplitWithinPayloadLimit(t *testing.T) {
 
 func TestRun_UTF8ChunkThatFitsRuneChunkingStillSplitsWithinPayloadLimit(t *testing.T) {
 	dir := t.TempDir()
-	mc := newMockVectorClient(t)
-	sp := newMockSplitter(t)
+	mc := mocks.NewMockInserter(t)
+	sp := mocks.NewMockSplitter(t)
 
 	content := makeUTF8PayloadContent(24, 180, utf8PayloadGlyph)
 	chunk := splitter.Chunk{Content: content, StartLine: 20, EndLine: 43}
@@ -986,8 +932,8 @@ func TestRun_UTF8ChunkThatFitsRuneChunkingStillSplitsWithinPayloadLimit(t *testi
 
 func TestRun_ASTCapableUTF8ChunkOversizedRetryKeepsDeclarationBoundaries(t *testing.T) {
 	dir := t.TempDir()
-	mc := newMockVectorClient(t)
-	sp := newMockSplitter(t)
+	mc := mocks.NewMockInserter(t)
+	sp := mocks.NewMockSplitter(t)
 
 	content := makeGoUTF8PayloadContent([]string{"First", "Second", "Third"}, 14, 120, utf8PayloadGlyph)
 	chunk := splitter.Chunk{Content: content, StartLine: 1, EndLine: strings.Count(content, "\n")}

@@ -3,6 +3,7 @@ package splitter
 import (
 	"errors"
 	"fmt"
+	"sync"
 
 	sitter "github.com/tree-sitter/go-tree-sitter"
 )
@@ -11,6 +12,12 @@ var (
 	errASTGrammarUnavailable = errors.New("AST grammar unavailable")
 	errNilParseTree          = errors.New("parse tree: nil tree")
 )
+
+var astParserPool = &sync.Pool{
+	New: func() any {
+		return sitter.NewParser()
+	},
+}
 
 func parseTree(source []byte, resolved *resolvedLanguage) (*sitter.Tree, error) {
 	if resolved == nil || resolved.grammar.Support != grammarSupportSupportedNow {
@@ -27,8 +34,16 @@ func parseTree(source []byte, resolved *resolvedLanguage) (*sitter.Tree, error) 
 		return nil, fmt.Errorf("%w: %q", errASTGrammarUnavailable, resolved.grammar.ID)
 	}
 
-	parser := sitter.NewParser()
-	defer parser.Close()
+	parser, ok := astParserPool.Get().(*sitter.Parser)
+	if !ok {
+		parser = sitter.NewParser()
+	}
+
+	parser.Reset()
+	defer func() {
+		parser.Reset()
+		astParserPool.Put(parser)
+	}()
 
 	if err := parser.SetLanguage(language); err != nil { // Defensive: bundled grammars are version-locked to the runtime.
 		return nil, fmt.Errorf("set split language: %w", err)

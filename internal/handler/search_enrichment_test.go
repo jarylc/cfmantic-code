@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	filesync "cfmantic-code/internal/sync"
 
@@ -134,6 +135,48 @@ func TestHandleSearch_WithFreshTSXExportedFunctionSymbolEnrichment(t *testing.T)
 	assert.Contains(t, text, "Found 1 results")
 	assert.Contains(t, text, "### 1. main.tsx (lines 2-2)\nSymbol: Title (function, lines 1-3)\n```tsx\n  return <h1>Hello</h1>;\n```")
 	assert.NotContains(t, text, "Symbol context unavailable")
+}
+
+func TestHandleSearch_MtimeOnlyChangeKeepsSymbolEnrichment(t *testing.T) {
+	mc := mocks.NewMockVectorClient(t)
+	sm := mocks.NewMockStatusManager(t)
+	sp := mocks.NewMockSplitter(t)
+	h := newTestHandler(t, mc, sm, sp, nil)
+
+	dir := t.TempDir()
+	collection := snapshot.CollectionName(dir)
+	content := "package main\n\nfunc helper() int {\n\treturn 1\n}\n"
+	filePath := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(filePath, []byte(content), 0o644))
+	saveSearchManifestForFile(t, dir, "main.go")
+
+	info, err := os.Stat(filePath)
+	require.NoError(t, err)
+
+	newModTime := info.ModTime().Add(2 * time.Second)
+	require.NoError(t, os.Chtimes(filePath, newModTime, newModTime))
+
+	results := []milvus.SearchResult{{
+		RelativePath:  "main.go",
+		StartLine:     3,
+		EndLine:       4,
+		FileExtension: "go",
+		Content:       "\treturn 1",
+	}}
+
+	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	mc.On("HybridSearch", mock.Anything, collection, "helper", 20, 60, "").Return(results, nil)
+
+	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
+		"path":  dir,
+		"query": "helper",
+	}))
+	require.NoError(t, err)
+	assert.False(t, res.IsError)
+
+	text := resultText(t, res)
+	assert.Contains(t, text, "### 1. main.go (lines 3-4)\nSymbol: helper (function, lines 3-5)\n```go\n\treturn 1\n```")
+	assert.NotContains(t, text, staleSymbolContextMessage)
 }
 
 func TestHandleSearch_StaleFileFallsBackToRawChunk(t *testing.T) {

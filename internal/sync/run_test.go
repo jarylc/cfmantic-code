@@ -850,12 +850,67 @@ func TestRunHelpers_HandleEdgeCases(t *testing.T) {
 		assert.NoError(t, deleteDeletedFiles(nil, nil))
 	})
 
-	t.Run("deleteModifiedFileChunks returns delete error", func(t *testing.T) {
-		err := deleteModifiedFileChunks([]modifiedFileChunkIDs{{relPath: "main.go", ids: []string{"chunk-keep", "chunk-old"}}}, map[string][]string{"main.go": {"", "chunk-keep"}}, nil, func(id string) error {
-			assert.Equal(t, "chunk-old", id)
-			return errors.New("delete boom")
+	t.Run("deleteDeletedFiles joins delete errors", func(t *testing.T) {
+		firstErr := errors.New("delete first")
+		secondErr := errors.New("delete second")
+
+		err := deleteDeletedFiles(&ManifestDiff{Changes: []FileChange{
+			{RelPath: "first.go", Type: Deleted},
+			{RelPath: "ignored.go", Type: Modified},
+			{RelPath: "second.go", Type: Deleted},
+		}}, func(relPath string) error {
+			switch relPath {
+			case "first.go":
+				return firstErr
+			case "second.go":
+				return secondErr
+			default:
+				return nil
+			}
 		})
-		require.EqualError(t, err, "delete boom")
+
+		require.ErrorIs(t, err, firstErr)
+		require.ErrorIs(t, err, secondErr)
+	})
+
+	t.Run("deleteModifiedFileChunks joins single delete errors", func(t *testing.T) {
+		firstErr := errors.New("delete first")
+		secondErr := errors.New("delete second")
+
+		err := deleteModifiedFileChunks([]modifiedFileChunkIDs{{relPath: "main.go", ids: []string{"chunk-keep", "chunk-old-a", "chunk-old-b"}}}, map[string][]string{"main.go": {"", "chunk-keep"}}, nil, func(id string) error {
+			switch id {
+			case "chunk-old-a":
+				return firstErr
+			case "chunk-old-b":
+				return secondErr
+			default:
+				return nil
+			}
+		})
+
+		require.ErrorIs(t, err, firstErr)
+		require.ErrorIs(t, err, secondErr)
+	})
+
+	t.Run("deleteModifiedFileChunks joins batch delete errors", func(t *testing.T) {
+		firstErr := errors.New("delete first batch")
+		secondErr := errors.New("delete second batch")
+
+		staleIDs := make([]string, 101)
+		for i := range staleIDs {
+			staleIDs[i] = fmt.Sprintf("chunk-stale-%03d", i+1)
+		}
+
+		err := deleteModifiedFileChunks([]modifiedFileChunkIDs{{relPath: "main.go", ids: staleIDs}}, nil, func(batch []string) error {
+			if len(batch) == 100 {
+				return firstErr
+			}
+
+			return secondErr
+		}, nil)
+
+		require.ErrorIs(t, err, firstErr)
+		require.ErrorIs(t, err, secondErr)
 	})
 
 	t.Run("deleteModifiedFileChunks batches stale ids", func(t *testing.T) {

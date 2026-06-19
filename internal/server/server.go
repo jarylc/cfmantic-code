@@ -25,7 +25,7 @@ func New(cfg *config.Config, h *handler.Handler) *server.MCPServer {
 
 	indexTool := mcp.NewTool("index_codebase",
 		mcp.WithDescription(indexToolDescription),
-		mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path to the local codebase root to index. Prefer the working directory so ignore-file handling and status tracking stay stable.")),
+		mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path to the codebase root to index. Hint: Use your current working directory if unsure.")),
 		mcp.WithBoolean("reindex", mcp.Description("Delete existing index data for this codebase path before rebuilding."), mcp.DefaultBool(false)),
 		mcp.WithBoolean("async", mcp.Description(indexAsyncDescription), mcp.DefaultBool(true)),
 		mcp.WithArray("ignorePatterns", mcp.Description("Extra ignore patterns to apply in addition to .gitignore, .indexignore, and Git exclude rules."), mcp.WithStringItems()),
@@ -34,7 +34,7 @@ func New(cfg *config.Config, h *handler.Handler) *server.MCPServer {
 
 	searchTool := mcp.NewTool("search_code",
 		mcp.WithDescription("Run a natural-language semantic search against a previously indexed local codebase."),
-		mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path to an indexed codebase root, or a subdirectory to limit results under an indexed ancestor.")),
+		mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path to an indexed codebase root or subdirectory. Hint: Use your current working directory if unsure.")),
 		mcp.WithString("query", mcp.Required(), mcp.Description("Natural-language description of the code, behavior, or symbols to find.")),
 		mcp.WithNumber("limit", mcp.Description("Maximum results to return (default 10, max 20)."), mcp.DefaultNumber(10)),
 		mcp.WithArray("extensionFilter", mcp.Description("Restrict results to these file extensions (for example '.go', '.ts')."), mcp.WithStringItems()),
@@ -43,13 +43,13 @@ func New(cfg *config.Config, h *handler.Handler) *server.MCPServer {
 
 	clearTool := mcp.NewTool("clear_index",
 		mcp.WithDescription("Remove the stored semantic index and local index state for a codebase."),
-		mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path to the indexed codebase root to clear.")),
+		mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path to an indexed codebase root. Hint: Use your current working directory if unsure.")),
 	)
 	s.AddTool(clearTool, h.HandleClear)
 
 	statusTool := mcp.NewTool("get_indexing_status",
 		mcp.WithDescription("Return indexing status and progress for a codebase."),
-		mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path to the codebase or a subdirectory to inspect. If that exact path is not indexed, status falls back to the nearest managed ancestor.")),
+		mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path to a codebase root or subdirectory. Hint: Use your current working directory if unsure.")),
 	)
 	s.AddTool(statusTool, h.HandleStatus)
 

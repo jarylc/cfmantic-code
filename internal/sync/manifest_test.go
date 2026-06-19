@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -610,11 +611,25 @@ func TestIsFileFresh(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, fresh)
 
-	require.NoError(t, os.WriteFile(filePath, append(content, []byte("// changed\n")...), 0o644))
+	t.Run("mtime-only change falls back to hash", func(t *testing.T) {
+		info, err := os.Stat(filePath)
+		require.NoError(t, err)
 
-	fresh, err = IsFileFresh(filePath, manifest.Files["main.go"])
-	require.NoError(t, err)
-	assert.False(t, fresh)
+		newModTime := info.ModTime().Add(2 * time.Second)
+		require.NoError(t, os.Chtimes(filePath, newModTime, newModTime))
+
+		fresh, err := IsFileFresh(filePath, manifest.Files["main.go"])
+		require.NoError(t, err)
+		assert.True(t, fresh)
+	})
+
+	t.Run("same-size content change is stale", func(t *testing.T) {
+		require.NoError(t, os.WriteFile(filePath, []byte("package test\n"), 0o644))
+
+		fresh, err := IsFileFresh(filePath, manifest.Files["main.go"])
+		require.NoError(t, err)
+		assert.False(t, fresh)
+	})
 }
 
 // ─── HashFilePath ─────────────────────────────────────────────────────────────

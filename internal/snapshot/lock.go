@@ -31,6 +31,7 @@ var (
 type lockInfo struct {
 	PID       int       `json:"pid"`
 	StartedAt time.Time `json:"startedAt"`
+	modTime   time.Time
 }
 
 const lockStaleAfter = 30 * time.Minute
@@ -83,8 +84,8 @@ func AcquireLock(codebasePath string) (func(), error) {
 				ErrLocked, existing.PID, existing.StartedAt.Format(time.RFC3339))
 		}
 
-		log.Printf("lock: removing stale lock (PID %d, %s old)",
-			existing.PID, time.Since(existing.StartedAt).Round(time.Second))
+		log.Printf("lock: removing stale lock (PID %d, lock file %s old)",
+			existing.PID, time.Since(existing.modTime).Round(time.Second))
 	}
 
 	// Stale or unreadable lock ��� remove it and retry once.
@@ -151,6 +152,11 @@ func atomicCreateLock(fp string) (func(), error) {
 }
 
 func readLockInfo(fp string) (lockInfo, error) {
+	fileInfo, err := os.Stat(fp)
+	if err != nil {
+		return lockInfo{}, fmt.Errorf("stat lock file: %w", err)
+	}
+
 	data, err := os.ReadFile(fp)
 	if err != nil {
 		return lockInfo{}, fmt.Errorf("read lock file: %w", err)
@@ -161,11 +167,17 @@ func readLockInfo(fp string) (lockInfo, error) {
 		return lockInfo{}, fmt.Errorf("unmarshal lock info: %w", err)
 	}
 
+	info.modTime = fileInfo.ModTime()
+
 	return info, nil
 }
 
 func isActiveLock(info lockInfo) bool {
 	if info.StartedAt.IsZero() {
+		return false
+	}
+
+	if info.modTime.IsZero() || time.Since(info.modTime) > lockStaleAfter {
 		return false
 	}
 

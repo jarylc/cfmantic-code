@@ -47,7 +47,7 @@ type Client struct {
 	httpClient     *http.Client
 }
 
-// NewClient creates a new Client with a 60-second HTTP timeout.
+// NewClient creates a new Client with a 300-second HTTP timeout.
 func NewClient(baseURL, authToken string) *Client {
 	return &Client{
 		baseURL:        baseURL,

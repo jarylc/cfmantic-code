@@ -543,13 +543,91 @@ func buildEntitiesForChunk(relPath, ext, codebasePath string, chunk splitter.Chu
 }
 
 func entityPayloadBytes(entity *milvus.Entity) (int, error) {
-	payload, err := json.Marshal(entity)
-	if err != nil {
-		// Defensive: milvus.Entity is strings+ints only today; keep the error if that invariant ever changes.
-		return 0, fmt.Errorf("marshal entity payload: %w", err)
+	return len(`{"id":`) +
+		jsonStringBytes(entity.ID) +
+		len(`,"content":`) +
+		jsonStringBytes(entity.Content) +
+		len(`,"relativePath":`) +
+		jsonStringBytes(entity.RelativePath) +
+		len(`,"startLine":`) +
+		jsonIntBytes(entity.StartLine) +
+		len(`,"endLine":`) +
+		jsonIntBytes(entity.EndLine) +
+		len(`,"fileExtension":`) +
+		jsonStringBytes(entity.FileExtension) +
+		len(`,"metadata":`) +
+		jsonStringBytes(entity.Metadata) +
+		len(`}`), nil
+}
+
+func jsonStringBytes(s string) int {
+	length := 2 // surrounding quotes
+
+	for i := 0; i < len(s); {
+		b := s[i]
+		if b < utf8.RuneSelf {
+			switch b {
+			case '\\', '"', '\n', '\r', '\t':
+				length += 2
+			case '\b', '\f':
+				length += 2
+			case '<', '>', '&':
+				length += 6
+			default:
+				if b < 0x20 {
+					length += 6
+				} else {
+					length++
+				}
+			}
+
+			i++
+
+			continue
+		}
+
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			length += len(`\ufffd`)
+			i++
+
+			continue
+		}
+
+		if r == '\u2028' || r == '\u2029' {
+			length += 6
+		} else {
+			length += size
+		}
+
+		i += size
 	}
 
-	return len(payload), nil
+	return length
+}
+
+func jsonIntBytes(n int) int {
+	if n == 0 {
+		return 1
+	}
+
+	length := 0
+
+	var value uint
+
+	if n < 0 {
+		length = 1 // minus sign
+		value = uint(-(n + 1)) + 1
+	} else {
+		value = uint(n)
+	}
+
+	for value > 0 {
+		length++
+		value /= 10
+	}
+
+	return length
 }
 
 func splitOversizedChunk(relPath string, chunk splitter.Chunk, payloadBytes int) ([]splitter.Chunk, error) {
