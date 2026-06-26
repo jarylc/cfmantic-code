@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -206,6 +207,70 @@ func TestRunWithContext_ContextCancellationReturnsCleanly(t *testing.T) {
 	})
 
 	require.NoError(t, runWithContext(ctx))
+	require.Equal(t, []string{"load-config", "start-sync", "new-stdio", "listen", "context-canceled", "stop-sync"}, rec.snapshot())
+}
+
+func TestRunWithContext_DoesNotAutoTrackStartupWorkingDirectory(t *testing.T) {
+	cfg := testMainConfig()
+	rec := &eventRecorder{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cwd := t.TempDir()
+	canonicalCWD, err := handler.CanonicalizePath(cwd)
+	require.NoError(t, err)
+
+	child := filepath.Join(canonicalCWD, "child")
+	sm := snapshot.NewManager()
+	sm.SetIndexed(canonicalCWD, 1, 1)
+
+	t.Chdir(cwd)
+
+	oldLoadConfig := loadConfig
+	oldNewSnapshotManager := newSnapshotManager
+	oldNewStdioServer := newStdioServer
+	oldStartSyncManager := startSyncManager
+	oldStopSyncManager := stopSyncManager
+
+	var trackedAtStart bool
+
+	loadConfig = func() (*config.Config, error) {
+		rec.add("load-config")
+
+		return cfg, nil
+	}
+	newSnapshotManager = func() (*snapshot.Manager, error) {
+		return sm, nil
+	}
+	newStdioServer = func(*server.MCPServer) stdioListener {
+		rec.add("new-stdio")
+
+		return stdioListenerFunc(func(ctx context.Context, _ io.Reader, _ io.Writer) error {
+			rec.add("listen")
+			cancel()
+			<-ctx.Done()
+			rec.add("context-canceled")
+
+			return ctx.Err()
+		})
+	}
+	startSyncManager = func(syncMgr *filesync.Manager) {
+		rec.add("start-sync")
+
+		_, trackedAtStart = syncMgr.TrackedParent(child)
+	}
+	stopSyncManager = func(*filesync.Manager) {
+		rec.add("stop-sync")
+	}
+
+	t.Cleanup(func() {
+		loadConfig = oldLoadConfig
+		newSnapshotManager = oldNewSnapshotManager
+		newStdioServer = oldNewStdioServer
+		startSyncManager = oldStartSyncManager
+		stopSyncManager = oldStopSyncManager
+	})
+
+	require.NoError(t, runWithContext(ctx))
+	require.False(t, trackedAtStart)
 	require.Equal(t, []string{"load-config", "start-sync", "new-stdio", "listen", "context-canceled", "stop-sync"}, rec.snapshot())
 }
 

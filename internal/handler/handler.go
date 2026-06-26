@@ -137,7 +137,7 @@ func (h *Handler) HandleIndex(ctx context.Context, req mcp.CallToolRequest) (*mc
 	}
 
 	if err := h.repairIndexPathMismatches(ctx, path); err != nil {
-		return mcp.NewToolResultError("failed to clear remote index: " + formatMilvusToolError(err, path)), nil
+		return mcp.NewToolResultError(formatIndexPathRepairError(err, path)), nil
 	}
 
 	if parent, _, ok := h.nearestManagedAncestor(path); ok {
@@ -211,7 +211,7 @@ func (h *Handler) HandleIndex(ctx context.Context, req mcp.CallToolRequest) (*mc
 
 	if reindex && (status == snapshot.StatusIndexed || status == snapshot.StatusFailed) {
 		if err := h.clearIndex(ctx, path); err != nil {
-			return mcp.NewToolResultError("failed to clear remote index: " + formatMilvusToolError(err, path)), nil
+			return mcp.NewToolResultError(formatClearIndexError(err, path)), nil
 		}
 	}
 
@@ -400,6 +400,44 @@ func formatMovedStatusError(err error) string {
 	), err)
 }
 
+type remoteClearedLocalPreservedError struct {
+	err error
+}
+
+func (e *remoteClearedLocalPreservedError) Error() string {
+	return e.err.Error()
+}
+
+func (e *remoteClearedLocalPreservedError) Unwrap() error {
+	return e.err
+}
+
+func formatIndexPathRepairError(err error, path string) string {
+	var preserved *remoteClearedLocalPreservedError
+	if errors.As(err, &preserved) {
+		return formatClearIndexError(err, path)
+	}
+
+	return "failed to clear remote index: " + formatMilvusToolError(err, path)
+}
+
+func formatClearIndexError(err error, path string) string {
+	var preserved *remoteClearedLocalPreservedError
+	if errors.As(err, &preserved) {
+		return "Failed to clear index: remote index was cleared, but local state was preserved because another process is indexing. Details: " + formatMilvusToolError(err, path)
+	}
+
+	if errors.Is(err, snapshot.ErrLocked) {
+		return fmt.Sprintf(
+			"Failed to clear index: %s. local state was preserved because another process is indexing.", formatMilvusToolError(err, path),
+		)
+	}
+
+	return fmt.Sprintf(
+		"Failed to clear remote index: %s. Local state was cleaned up — re-run to retry remote cleanup.", formatMilvusToolError(err, path),
+	)
+}
+
 func rerankAuxiliaryResults(results []milvus.SearchResult) []milvus.SearchResult {
 	if len(results) < 2 {
 		return results
@@ -446,9 +484,7 @@ func (h *Handler) HandleClear(ctx context.Context, req mcp.CallToolRequest) (*mc
 
 	handled, err := h.repairStoredPathMismatch(ctx, path, map[string]struct{}{}, map[string]struct{}{})
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf(
-			"Failed to clear remote index: %s. Local state was cleaned up — re-run to retry remote cleanup.", formatMilvusToolError(err, path),
-		)), nil
+		return mcp.NewToolResultError(formatClearIndexError(err, path)), nil
 	}
 
 	if handled {
@@ -456,9 +492,7 @@ func (h *Handler) HandleClear(ctx context.Context, req mcp.CallToolRequest) (*mc
 	}
 
 	if err := h.clearIndex(ctx, path); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf(
-			"Failed to clear remote index: %s. Local state was cleaned up — re-run to retry remote cleanup.", formatMilvusToolError(err, path),
-		)), nil
+		return mcp.NewToolResultError(formatClearIndexError(err, path)), nil
 	}
 
 	return mcp.NewToolResultText("Index cleared for " + path), nil
@@ -500,6 +534,10 @@ func (h *Handler) HandleStatus(ctx context.Context, req mcp.CallToolRequest) (*m
 
 	if info == nil {
 		return mcp.NewToolResultError(notIndexedMessage), nil
+	}
+
+	if h.syncMgr != nil && info.Status == snapshot.StatusIndexed {
+		h.syncMgr.TrackPath(statusPath)
 	}
 
 	const timeFmt = "2006-01-02T15:04:05Z07:00"
@@ -559,7 +597,7 @@ func (h *Handler) HandleStatus(ctx context.Context, req mcp.CallToolRequest) (*m
 		msg = fmt.Sprintf("Index complete\nFiles: %d\nChunks: %d\nLast updated: %s", info.IndexedFiles, info.TotalChunks, info.LastUpdated.Format(timeFmt))
 	case snapshot.StatusFailed:
 		msg = fmt.Sprintf("Indexing failed: %s\nLast attempt: %s", info.ErrorMessage, info.LastUpdated.Format(timeFmt))
-		if strings.Contains(strings.ToLower(info.ErrorMessage), "try again") {
+		if milvus.IsRetryableAPIErrorMessage(info.ErrorMessage) {
 			msg += "\n\nPartial progress was saved. Run index_codebase (without reindex) to continue where indexing left off."
 		}
 
@@ -1034,20 +1072,35 @@ func (h *Handler) repairStoredPathMismatch(ctx context.Context, path string, cle
 		clearErr := h.clearIndex(ctx, mismatch.StoredPath)
 
 		clearedStoredPaths[mismatch.StoredPath] = struct{}{}
+
+		var localErr error
 		if _, cleaned := cleanedCurrentPaths[mismatch.Path]; !cleaned {
-			h.clearLocalIndexState(mismatch.Path)
+			localErr = h.clearLocalIndexState(mismatch.Path)
 			cleanedCurrentPaths[mismatch.Path] = struct{}{}
 		}
 
 		if clearErr != nil {
+			if localErr != nil {
+				return true, fmt.Errorf("clear stale index for %q using stored path %q: %w; clear local index state for %q: %w", mismatch.Path, mismatch.StoredPath, clearErr, mismatch.Path, localErr)
+			}
+
 			return true, fmt.Errorf("clear stale index for %q using stored path %q: %w", mismatch.Path, mismatch.StoredPath, clearErr)
+		}
+
+		if localErr != nil {
+			return true, &remoteClearedLocalPreservedError{
+				err: fmt.Errorf("clear local index state for %q: %w", mismatch.Path, localErr),
+			}
 		}
 
 		return true, nil
 	}
 
 	if _, cleaned := cleanedCurrentPaths[mismatch.Path]; !cleaned {
-		h.clearLocalIndexState(mismatch.Path)
+		if err := h.clearLocalIndexState(mismatch.Path); err != nil {
+			return true, fmt.Errorf("clear local index state for %q: %w", mismatch.Path, err)
+		}
+
 		cleanedCurrentPaths[mismatch.Path] = struct{}{}
 	}
 
@@ -1185,25 +1238,66 @@ func buildSearchFilter(extensions []string, pathFilter string) string {
 func (h *Handler) clearIndex(ctx context.Context, path string) error {
 	h.cancelActiveManualIndex(path)
 
-	collectionName := snapshot.CollectionName(path)
+	return h.withSnapshotLock(path, func() error {
+		collectionName := snapshot.CollectionName(path)
 
-	dropErr := h.milvus.DropCollection(ctx, collectionName)
-	if dropErr != nil {
-		dropErr = fmt.Errorf("drop collection %s: %w", collectionName, dropErr)
-		log.Printf("handler: %v", dropErr)
-	}
+		dropErr := h.milvus.DropCollection(ctx, collectionName)
+		if dropErr != nil {
+			dropErr = fmt.Errorf("drop collection %s: %w", collectionName, dropErr)
+			log.Printf("handler: %v", dropErr)
+		}
 
-	h.clearLocalIndexState(path)
+		h.clearLocalIndexStateLocked(path)
 
-	return dropErr
+		return dropErr
+	})
 }
 
-func (h *Handler) clearLocalIndexState(path string) {
+func (h *Handler) clearLocalIndexState(path string) error {
+	return h.withSnapshotLock(path, func() error {
+		h.clearLocalIndexStateLocked(path)
+
+		return nil
+	})
+}
+
+func (h *Handler) withSnapshotLock(path string, fn func() error) error {
+	release, err := snapshot.AcquireLock(path)
+	if err != nil {
+		return fmt.Errorf("lock: %w", err)
+	}
+
+	defer func() {
+		release()
+		os.Remove(snapshot.MetadataDirPath(path)) //nolint:gosec // G104: best-effort cleanup of empty metadata dir
+	}()
+
+	return fn()
+}
+
+func (h *Handler) clearLocalIndexStateLocked(path string) {
 	h.snapshot.Remove(path)
 
 	if h.syncMgr != nil {
 		h.syncMgr.UntrackPath(path)
 	}
 
-	os.RemoveAll(snapshot.MetadataDirPath(path)) //nolint:gosec // G104: best-effort cleanup
+	removeMetadataDirContentsExceptLock(path)
+}
+
+func removeMetadataDirContentsExceptLock(path string) {
+	metadataDir := snapshot.MetadataDirPath(path)
+
+	entries, err := os.ReadDir(metadataDir)
+	if err != nil {
+		return
+	}
+
+	for _, entry := range entries {
+		if entry.Name() == filepath.Base(snapshot.LockFilePath(path)) {
+			continue
+		}
+
+		os.RemoveAll(filepath.Join(metadataDir, entry.Name())) //nolint:gosec // G104: best-effort cleanup
+	}
 }

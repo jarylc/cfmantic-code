@@ -399,11 +399,12 @@ func TestStop_CancelsActiveBackgroundSync(t *testing.T) {
 	}
 }
 
-func TestAutoTrackWorkingDirectory_TracksCanonicalizedPath(t *testing.T) {
+func TestAutoTrackWorkingDirectory_TracksCanonicalizedIndexedPath(t *testing.T) {
 	cfg := testConfig(t)
+	sm := snapshot.NewManager()
 	mgr := NewManager(
 		mocks.NewMockVectorClient(t),
-		mocks.NewMockStatusManager(t),
+		sm,
 		mocks.NewMockSplitter(t),
 		cfg, 300,
 	)
@@ -412,6 +413,7 @@ func TestAutoTrackWorkingDirectory_TracksCanonicalizedPath(t *testing.T) {
 	linkParent := t.TempDir()
 	link := filepath.Join(linkParent, "link")
 	require.NoError(t, os.Symlink(realDir, link))
+	sm.SetIndexed(realDir, 1, 1)
 
 	var logs []string
 
@@ -426,6 +428,33 @@ func TestAutoTrackWorkingDirectory_TracksCanonicalizedPath(t *testing.T) {
 	mgr.mu.RLock()
 	assert.True(t, mgr.trackedPaths[realDir])
 	assert.Len(t, mgr.trackedPaths, 1)
+	mgr.mu.RUnlock()
+	assert.Empty(t, logs)
+}
+
+func TestAutoTrackWorkingDirectory_SkipsCanonicalizedPathUnlessIndexed(t *testing.T) {
+	cfg := testConfig(t)
+	mgr := NewManager(
+		mocks.NewMockVectorClient(t),
+		snapshot.NewManager(),
+		mocks.NewMockSplitter(t),
+		cfg, 300,
+	)
+
+	dir := t.TempDir()
+
+	var logs []string
+
+	mgr.autoTrackWorkingDirectory(
+		func() (string, error) { return dir, nil },
+		func(path string) (string, error) { return path, nil },
+		func(format string, args ...any) {
+			logs = append(logs, fmt.Sprintf(format, args...))
+		},
+	)
+
+	mgr.mu.RLock()
+	assert.Empty(t, mgr.trackedPaths)
 	mgr.mu.RUnlock()
 	assert.Empty(t, logs)
 }
@@ -455,7 +484,7 @@ func TestAutoTrackWorkingDirectory_GetwdFailure_LogsAndSkips(t *testing.T) {
 	assert.Empty(t, mgr.trackedPaths)
 	mgr.mu.RUnlock()
 	require.Len(t, logs, 1)
-	assert.Contains(t, logs[0], "startup auto-track skipped")
+	assert.Contains(t, logs[0], "working directory auto-track skipped")
 	assert.Contains(t, logs[0], "working directory")
 }
 
@@ -484,21 +513,23 @@ func TestAutoTrackWorkingDirectory_CanonicalizeFailure_LogsAndSkips(t *testing.T
 	assert.Empty(t, mgr.trackedPaths)
 	mgr.mu.RUnlock()
 	require.Len(t, logs, 1)
-	assert.Contains(t, logs[0], "startup auto-track skipped")
+	assert.Contains(t, logs[0], "working directory auto-track skipped")
 	assert.Contains(t, logs[0], "/tmp/project")
 }
 
 func TestAutoTrackWorkingDirectory_UsesProcessWorkingDirectory(t *testing.T) {
 	cfg := testConfig(t)
+	sm := snapshot.NewManager()
 	mgr := NewManager(
 		mocks.NewMockVectorClient(t),
-		mocks.NewMockStatusManager(t),
+		sm,
 		mocks.NewMockSplitter(t),
 		cfg, 300,
 	)
 
 	dir := t.TempDir()
 	t.Chdir(dir)
+	sm.SetIndexed(dir, 1, 1)
 
 	mgr.AutoTrackWorkingDirectory(func(path string) (string, error) {
 		return path, nil

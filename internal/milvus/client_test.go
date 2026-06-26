@@ -66,6 +66,19 @@ func writeAPIResp(w http.ResponseWriter, code int, data any, message string) {
 	_, _ = w.Write(b)
 }
 
+func stubRetryBackoff(t *testing.T) {
+	t.Helper()
+
+	original := sleepWithJitter
+	sleepWithJitter = func(ctx context.Context, _ time.Duration) error {
+		return ctx.Err()
+	}
+
+	t.Cleanup(func() {
+		sleepWithJitter = original
+	})
+}
+
 // ─── NewClient ────────────────────────────────────────────────────────────────
 
 func TestNewClient(t *testing.T) {
@@ -408,13 +421,14 @@ func TestDo_DoFailureMaxRetries(t *testing.T) {
 	assert.EqualValues(t, 4, callCount.Load()) // initial attempt + 3 retries
 }
 
-// TestDo_RetryAPICapacityExceeded ≈ 1 s (one retryable API error → one sleep(1s))
 func TestDo_RetryAPICapacityExceeded(t *testing.T) {
+	stubRetryBackoff(t)
+
 	var callCount atomic.Int32
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		n := callCount.Add(1)
-		if n == 1 {
+		if n <= 4 {
 			writeAPIResp(w, 1, nil, "AiError: 3040: Capacity temporarily exceeded, please try again.")
 			return
 		}
@@ -426,7 +440,7 @@ func TestDo_RetryAPICapacityExceeded(t *testing.T) {
 	c := NewClient(srv.URL, "token")
 	err := c.do(context.Background(), "/test", map[string]string{}, nil)
 	require.NoError(t, err)
-	assert.EqualValues(t, 2, callCount.Load())
+	assert.EqualValues(t, 5, callCount.Load())
 }
 
 func TestDo_NonRetryableAPIError(t *testing.T) {
@@ -445,8 +459,9 @@ func TestDo_NonRetryableAPIError(t *testing.T) {
 	assert.EqualValues(t, 1, callCount.Load())
 }
 
-// TestDo_RetryAPIErrorMaxRetriesExhausted ≈ 7 s (3 retries → sleep 1+2+4 s)
 func TestDo_RetryAPIErrorMaxRetriesExhausted(t *testing.T) {
+	stubRetryBackoff(t)
+
 	var callCount atomic.Int32
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -459,7 +474,7 @@ func TestDo_RetryAPIErrorMaxRetriesExhausted(t *testing.T) {
 	err := c.do(context.Background(), "/test", map[string]string{}, nil)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrAPIResponse)
-	assert.EqualValues(t, 4, callCount.Load()) // initial attempt + 3 retries
+	assert.EqualValues(t, 5, callCount.Load()) // initial attempt + 4 retries
 }
 
 // ─── CreateCollection ─────────────────────────────────────────────────────────

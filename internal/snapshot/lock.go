@@ -177,10 +177,6 @@ func isActiveLock(info lockInfo) bool {
 		return false
 	}
 
-	if info.modTime.IsZero() || time.Since(info.modTime) > lockStaleAfter {
-		return false
-	}
-
 	return processAlive(info.PID)
 }
 

@@ -138,7 +138,7 @@ func (m *Manager) TrackedParent(path string) (string, bool) {
 }
 
 // AutoTrackWorkingDirectory registers the current process working directory for
-// background sync. Failures are logged and skipped so startup can continue.
+// background sync. Failures are logged and skipped so callers can continue.
 func (m *Manager) AutoTrackWorkingDirectory(canonicalize func(string) (string, error)) {
 	m.autoTrackWorkingDirectory(os.Getwd, canonicalize, log.Printf)
 }
@@ -157,15 +157,19 @@ func (m *Manager) autoTrackWorkingDirectory(
 ) {
 	cwd, err := getwd()
 	if err != nil {
-		logf("sync: startup auto-track skipped: resolve working directory: %v", err)
+		logf("sync: working directory auto-track skipped: resolve working directory: %v", err)
 
 		return
 	}
 
 	path, err := canonicalize(cwd)
 	if err != nil {
-		logf("sync: startup auto-track skipped for %q: %v", cwd, err)
+		logf("sync: working directory auto-track skipped for %q: %v", cwd, err)
 
+		return
+	}
+
+	if m.snapshot.GetStatus(path) != snapshot.StatusIndexed {
 		return
 	}
 

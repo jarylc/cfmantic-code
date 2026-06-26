@@ -144,6 +144,11 @@ func isMissingSearchStateMessage(message string) bool {
 	return strings.Contains(message, "no such table") || strings.Contains(message, "table not found")
 }
 
+// IsRetryableAPIErrorMessage reports whether a backend API error message asks the caller to retry.
+func IsRetryableAPIErrorMessage(message string) bool {
+	return strings.Contains(strings.ToLower(message), "try again")
+}
+
 // CreateCollection creates a collection with the given name and vector dimension.
 // When hybrid is true, a BM25 sparse vector function is included in the schema.
 // The operation is idempotent — if the collection already exists, nil is returned.
@@ -328,9 +333,14 @@ func (c *Client) do(ctx context.Context, path string, reqBody, result any) error
 		return fmt.Errorf("milvus: marshal request: %w", err)
 	}
 
-	const maxRetries = 3
+	const (
+		maxRetries             = 3
+		retryableAPIMaxRetries = 4
+	)
 
-	for attempt := 0; attempt <= maxRetries; attempt++ {
+	// Keep one loop for all retry paths; network/HTTP errors still stop at
+	// maxRetries, while retryable API capacity errors may use the larger budget.
+	for attempt := 0; attempt <= retryableAPIMaxRetries; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(body))
 		if err != nil {
 			return fmt.Errorf("milvus: create request: %w", err)
@@ -398,7 +408,7 @@ func (c *Client) do(ctx context.Context, path string, reqBody, result any) error
 		}
 
 		if apiResp.Code != 0 {
-			if attempt < maxRetries && strings.Contains(strings.ToLower(apiResp.Message), "try again") {
+			if attempt < retryableAPIMaxRetries && IsRetryableAPIErrorMessage(apiResp.Message) {
 				log.Printf("milvus: POST %s attempt %d API error (retryable): code %d: %s", path, attempt+1, apiResp.Code, apiResp.Message)
 
 				if retryErr := sleepWithJitter(ctx, time.Duration(1<<attempt)*time.Second); retryErr != nil {
@@ -430,7 +440,9 @@ func (c *Client) do(ctx context.Context, path string, reqBody, result any) error
 // sleepWithJitter waits for the given base duration plus up to 25% random jitter,
 // but returns immediately with ctx.Err() if the context is canceled first.
 // This prevents thundering herd on retry storms and supports clean shutdown.
-func sleepWithJitter(ctx context.Context, base time.Duration) error {
+var sleepWithJitter = sleepWithJitterImpl
+
+func sleepWithJitterImpl(ctx context.Context, base time.Duration) error {
 	jitter := time.Duration(rand.Int63n(int64(base) / 4)) //nolint:gosec // non-cryptographic jitter is intentional
 	timer := time.NewTimer(base + jitter)
 

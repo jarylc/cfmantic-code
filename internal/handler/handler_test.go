@@ -1223,6 +1223,34 @@ func TestHandleIndex_Reindex(t *testing.T) {
 	}, 5*time.Second, 5*time.Millisecond, "background goroutine did not exit in time")
 }
 
+func TestHandleIndex_Reindex_LiveLockPreservesIndexState(t *testing.T) {
+	mc := mocks.NewMockVectorClient(t)
+	sm := mocks.NewMockStatusManager(t)
+	sp := mocks.NewMockSplitter(t)
+	h := newTestHandler(t, mc, sm, sp, nil)
+
+	dir := t.TempDir()
+	writeLockForCurrentProcess(t, dir)
+	stateFile := filepath.Join(snapshot.MetadataDirPath(dir), "state.json")
+	require.NoError(t, os.WriteFile(stateFile, []byte(`{"path":"`+dir+`","status":"indexed"}`), 0o644))
+
+	sm.On("IsIndexing", dir).Return(false)
+	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+
+	res, err := h.HandleIndex(context.Background(), makeReq(map[string]any{
+		"path":    dir,
+		"reindex": true,
+	}))
+	require.NoError(t, err)
+	requireErrorResult(t, res, "lock is held")
+	assert.Contains(t, resultText(t, res), "local state was preserved")
+
+	_, statErr := os.Stat(stateFile)
+	require.NoError(t, statErr, "reindex must preserve local state while another live process holds the lock")
+	mc.AssertNotCalled(t, "DropCollection", mock.Anything, mock.Anything)
+	mc.AssertNotCalled(t, "CreateCollection", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+}
+
 func TestHandleIndex_Reindex_FailedStatusClearsRemoteIndex(t *testing.T) {
 	mc := mocks.NewMockVectorClient(t)
 	sm := mocks.NewMockStatusManager(t)
@@ -2924,6 +2952,93 @@ func TestHandleStatus_FallsBackToManagedAncestor(t *testing.T) {
 	assert.Contains(t, text, "Chunks: 300")
 }
 
+func TestHandleStatus_TracksResolvedIndexedPath(t *testing.T) {
+	mc := mocks.NewMockVectorClient(t)
+	sp := mocks.NewMockSplitter(t)
+	sm := snapshot.NewManager()
+	cfg := loadTestConfig(t)
+	syncMgr := filesync.NewManager(mc, sm, sp, cfg, 300)
+	h := New(mc, sm, cfg, sp, syncMgr)
+
+	dir := t.TempDir()
+	sm.SetIndexed(dir, 42, 300)
+
+	res, err := h.HandleStatus(context.Background(), makeReq(map[string]any{
+		"path": dir,
+	}))
+	require.NoError(t, err)
+	assert.False(t, res.IsError)
+
+	tracked, ok := syncMgr.TrackedParent(filepath.Join(dir, "pkg"))
+	require.True(t, ok)
+	assert.Equal(t, dir, tracked)
+}
+
+func TestHandleStatus_TracksResolvedIndexedAncestor(t *testing.T) {
+	mc := mocks.NewMockVectorClient(t)
+	sp := mocks.NewMockSplitter(t)
+	sm := snapshot.NewManager()
+	cfg := loadTestConfig(t)
+	syncMgr := filesync.NewManager(mc, sm, sp, cfg, 300)
+	h := New(mc, sm, cfg, sp, syncMgr)
+
+	dir := t.TempDir()
+	child := filepath.Join(dir, "pkg", "service")
+	require.NoError(t, os.MkdirAll(child, 0o755))
+	sm.SetIndexed(dir, 42, 300)
+
+	res, err := h.HandleStatus(context.Background(), makeReq(map[string]any{
+		"path": child,
+	}))
+	require.NoError(t, err)
+	assert.False(t, res.IsError)
+
+	tracked, ok := syncMgr.TrackedParent(filepath.Join(child, "deeper"))
+	require.True(t, ok)
+	assert.Equal(t, dir, tracked)
+}
+
+func TestHandleStatus_DoesNotTrackUnknownPath(t *testing.T) {
+	mc := mocks.NewMockVectorClient(t)
+	sp := mocks.NewMockSplitter(t)
+	sm := snapshot.NewManager()
+	cfg := loadTestConfig(t)
+	syncMgr := filesync.NewManager(mc, sm, sp, cfg, 300)
+	h := New(mc, sm, cfg, sp, syncMgr)
+
+	dir := t.TempDir()
+
+	res, err := h.HandleStatus(context.Background(), makeReq(map[string]any{
+		"path": dir,
+	}))
+	require.NoError(t, err)
+	requireErrorResult(t, res, "not indexed, run index_codebase first")
+
+	_, ok := syncMgr.TrackedParent(filepath.Join(dir, "pkg"))
+	assert.False(t, ok)
+}
+
+func TestHandleStatus_DoesNotTrackPresentNonIndexedPath(t *testing.T) {
+	mc := mocks.NewMockVectorClient(t)
+	sp := mocks.NewMockSplitter(t)
+	sm := snapshot.NewManager()
+	cfg := loadTestConfig(t)
+	syncMgr := filesync.NewManager(mc, sm, sp, cfg, 300)
+	h := New(mc, sm, cfg, sp, syncMgr)
+
+	dir := t.TempDir()
+	sm.SetFailed(dir, "boom")
+
+	res, err := h.HandleStatus(context.Background(), makeReq(map[string]any{
+		"path": dir,
+	}))
+	require.NoError(t, err)
+	requireErrorResult(t, res, "Indexing failed: boom")
+
+	_, ok := syncMgr.TrackedParent(filepath.Join(dir, "pkg"))
+	assert.False(t, ok)
+}
+
 func TestHandleStatus_MoveRenameDetectedAtPath(t *testing.T) {
 	mc := mocks.NewMockVectorClient(t)
 	sp := mocks.NewMockSplitter(t)
@@ -3130,6 +3245,7 @@ func TestHandleStatus_Failed(t *testing.T) {
 	}))
 	require.NoError(t, err)
 	requireErrorResult(t, res, "Indexing failed: connection error")
+	assert.NotContains(t, resultText(t, res), "Run index_codebase (without reindex)")
 }
 
 func TestHandleStatus_FailedRetryable(t *testing.T) {
@@ -3281,6 +3397,28 @@ func TestHandleClear_DropCollectionError(t *testing.T) {
 	// Local cleanup must still have been attempted (sm.Remove was called).
 }
 
+func TestHandleClear_LiveLockPreservesIndexState(t *testing.T) {
+	mc := mocks.NewMockVectorClient(t)
+	sm := mocks.NewMockStatusManager(t)
+	sp := mocks.NewMockSplitter(t)
+	h := newTestHandler(t, mc, sm, sp, nil)
+
+	dir := t.TempDir()
+	writeLockForCurrentProcess(t, dir)
+	sentinel := filepath.Join(snapshot.MetadataDirPath(dir), "state.json")
+	require.NoError(t, os.WriteFile(sentinel, []byte(`{"path":"`+dir+`","status":"indexed"}`), 0o644))
+
+	res, err := h.HandleClear(context.Background(), makeReq(map[string]any{
+		"path": dir,
+	}))
+	require.NoError(t, err)
+	requireErrorResult(t, res, "lock is held")
+
+	_, statErr := os.Stat(sentinel)
+	require.NoError(t, statErr, "clear_index must preserve .cfmantic state while another live process holds the lock")
+	mc.AssertNotCalled(t, "DropCollection", mock.Anything, mock.Anything)
+}
+
 func TestHandleClear_MoveRenameDetectedAtPath_UsesStoredPath(t *testing.T) {
 	mc := mocks.NewMockVectorClient(t)
 	sm := mocks.NewMockStatusManager(t)
@@ -3312,6 +3450,42 @@ func TestHandleClear_MoveRenameDetectedAtPath_UsesStoredPath(t *testing.T) {
 
 	_, statErr := os.Stat(filepath.Join(snapshot.MetadataDirPath(dir), "state.json"))
 	assert.True(t, os.IsNotExist(statErr))
+}
+
+func TestHandleClear_MoveRenamePreservesCurrentStateWhenLocked(t *testing.T) {
+	mc := mocks.NewMockVectorClient(t)
+	sm := mocks.NewMockStatusManager(t)
+	sp := mocks.NewMockSplitter(t)
+	h := newTestHandler(t, mc, sm, sp, nil)
+
+	dir := t.TempDir()
+	storedPath := filepath.Join(t.TempDir(), "old-root")
+	require.NoError(t, os.MkdirAll(snapshot.MetadataDirPath(dir), 0o755))
+
+	data, err := json.Marshal(&snapshot.CodebaseInfo{
+		Path:        storedPath,
+		Status:      snapshot.StatusIndexed,
+		LastUpdated: time.Now(),
+	})
+	require.NoError(t, err)
+
+	stateFile := filepath.Join(snapshot.MetadataDirPath(dir), "state.json")
+	require.NoError(t, os.WriteFile(stateFile, data, 0o644))
+	writeLockForCurrentProcess(t, dir)
+
+	mc.On("DropCollection", mock.Anything, snapshot.CollectionName(storedPath)).Return(nil).Once()
+	sm.On("Remove", storedPath).Return().Once()
+
+	res, err := h.HandleClear(context.Background(), makeReq(map[string]any{
+		"path": dir,
+	}))
+	require.NoError(t, err)
+	requireErrorResult(t, res, "remote index was cleared")
+	assert.Contains(t, resultText(t, res), "local state was preserved")
+	assert.Contains(t, resultText(t, res), "lock is held")
+
+	_, statErr := os.Stat(stateFile)
+	require.NoError(t, statErr, "move/rename repair must preserve local .cfmantic state while it is locked")
 }
 
 func TestHandleClear_MoveRenameDetectedAtPath_DropError(t *testing.T) {
@@ -3843,7 +4017,7 @@ func TestHandleIndex_Reindex_DropError(t *testing.T) {
 		"reindex": true,
 	}))
 	require.NoError(t, err)
-	requireErrorResult(t, res, "failed to clear remote index")
+	requireErrorResult(t, res, "Failed to clear remote index")
 }
 
 // ─── TDD: graceful degradation — partial progress on failure ─────────────────
