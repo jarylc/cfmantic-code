@@ -42,10 +42,13 @@ var (
 )
 
 const (
-	notIndexedMessage  = "not indexed, run index_codebase first"
-	searchBackendLimit = 20
-	searchBackendRRFK  = 60
-	progressSavePeriod = time.Second
+	notIndexedMessage       = "not indexed, run index_codebase first"
+	searchDefaultLimit      = 5
+	searchBackendLimit      = 20
+	searchBackendRRFK       = 60
+	searchDefaultMaxLines   = 40
+	searchDefaultMaxContent = 2000
+	progressSavePeriod      = time.Second
 )
 
 var auxiliaryBasenames = map[string]struct{}{
@@ -290,7 +293,8 @@ func (h *Handler) HandleSearch(ctx context.Context, req mcp.CallToolRequest) (*m
 		preamble = fmt.Sprintf("Indexing in progress (%s). Results may be incomplete.\n\n", step)
 	}
 
-	requestedLimit := min(max(int(req.GetFloat("limit", 10)), 1), searchBackendLimit)
+	requestedLimit := min(max(int(req.GetFloat("limit", searchDefaultLimit)), 1), searchBackendLimit)
+	outputOptions := searchOutputOptionsFromRequest(&req)
 
 	extensionFilter := req.GetStringSlice("extensionFilter", []string{})
 
@@ -313,7 +317,7 @@ func (h *Handler) HandleSearch(ctx context.Context, req mcp.CallToolRequest) (*m
 		return mcp.NewToolResultError("search failed: " + formatMilvusToolError(err, searchRoot)), nil
 	}
 
-	results = rerankAuxiliaryResults(results)
+	results = mergeSearchResults(rerankAuxiliaryResults(results))
 	if len(results) > requestedLimit {
 		results = results[:requestedLimit]
 	}
@@ -340,7 +344,16 @@ func (h *Handler) HandleSearch(ctx context.Context, req mcp.CallToolRequest) (*m
 			fmt.Fprintf(&sb, "%s\n", enrichment.note)
 		}
 
-		fmt.Fprintf(&sb, "```%s\n%s\n```\n", r.FileExtension, r.Content)
+		if outputOptions.metadataOnly {
+			continue
+		}
+
+		content, truncated := truncateSearchContent(r.Content, outputOptions)
+		fmt.Fprintf(&sb, "```%s\n%s\n```\n", r.FileExtension, content)
+
+		if truncated {
+			fmt.Fprintf(&sb, "Content truncated (maxContentLines=%d, maxContentChars=%d; set either to 0 to disable that cap).\n", outputOptions.maxContentLines, outputOptions.maxContentChars)
+		}
 	}
 
 	return mcp.NewToolResultText(sb.String()), nil

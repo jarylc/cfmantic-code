@@ -177,12 +177,15 @@ func waitForDone(t *testing.T, done <-chan struct{}, timeout time.Duration) {
 func requireIndexSemaphoreReleased(t *testing.T, h *Handler) {
 	t.Helper()
 
-	select {
-	case h.indexSem <- struct{}{}:
-		<-h.indexSem
-	default:
-		t.Fatal("index semaphore leaked")
-	}
+	require.Eventually(t, func() bool {
+		select {
+		case h.indexSem <- struct{}{}:
+			<-h.indexSem
+			return true
+		default:
+			return false
+		}
+	}, 5*time.Second, 5*time.Millisecond, "index semaphore leaked")
 }
 
 func requireNoIndexLock(t *testing.T, path string) {
@@ -2368,10 +2371,11 @@ func TestHandleSearch_LimitDefault(t *testing.T) {
 
 	dir := t.TempDir()
 	collection := snapshot.CollectionName(dir)
+	results := makeSearchResults(6)
 
 	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
-	// No "limit" arg → default output 10, backend fetch still uses 20 for rerank headroom.
-	mc.On("HybridSearch", mock.Anything, collection, "test", 20, 60, "").Return([]milvus.SearchResult{}, nil)
+	// No "limit" arg → default output 5, backend fetch still uses 20 for rerank headroom.
+	mc.On("HybridSearch", mock.Anything, collection, "test", 20, 60, "").Return(results, nil)
 
 	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
 		"path":  dir,
@@ -2379,6 +2383,11 @@ func TestHandleSearch_LimitDefault(t *testing.T) {
 	}))
 	require.NoError(t, err)
 	assert.False(t, res.IsError)
+
+	text := resultText(t, res)
+	assert.Contains(t, text, "Found 5 results")
+	assert.Contains(t, text, "file-05.go")
+	assert.NotContains(t, text, "file-06.go")
 }
 
 func TestHandleSearch_LimitZero(t *testing.T) {
@@ -2549,6 +2558,204 @@ func TestHandleSearch_WithResults(t *testing.T) {
 	assert.Contains(t, text, "Found 1 results")
 	assert.Contains(t, text, "main.go")
 	assert.Contains(t, text, "package main")
+}
+
+func TestHandleSearch_MetadataOnlyOmitsContentAndCodeFence(t *testing.T) {
+	mc := mocks.NewMockVectorClient(t)
+	sm := mocks.NewMockStatusManager(t)
+	sp := mocks.NewMockSplitter(t)
+	h := newTestHandler(t, mc, sm, sp, nil)
+
+	dir := t.TempDir()
+	collection := snapshot.CollectionName(dir)
+	results := []milvus.SearchResult{
+		{RelativePath: "main.go", StartLine: 1, EndLine: 3, FileExtension: "go", Content: "package main"},
+	}
+
+	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	mc.On("HybridSearch", mock.Anything, collection, "main function", 20, 60, "").Return(results, nil)
+
+	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
+		"path":         dir,
+		"query":        "main function",
+		"metadataOnly": true,
+	}))
+	require.NoError(t, err)
+	assert.False(t, res.IsError)
+
+	text := resultText(t, res)
+	assert.Contains(t, text, "Found 1 results")
+	assert.Contains(t, text, "### 1. main.go (lines 1-3)")
+	assert.NotContains(t, text, "package main")
+	assert.NotContains(t, text, "```")
+}
+
+func TestHandleSearch_TruncatesContentByDefault(t *testing.T) {
+	mc := mocks.NewMockVectorClient(t)
+	sm := mocks.NewMockStatusManager(t)
+	sp := mocks.NewMockSplitter(t)
+	h := newTestHandler(t, mc, sm, sp, nil)
+
+	dir := t.TempDir()
+	collection := snapshot.CollectionName(dir)
+
+	content := strings.Join(append(make([]string, 40), "line 41"), "\n")
+	for i := range 40 {
+		content = strings.Replace(content, "\n", fmt.Sprintf("line %02d\n", i+1), 1)
+	}
+
+	results := []milvus.SearchResult{
+		{RelativePath: "long.go", StartLine: 1, EndLine: 41, FileExtension: "go", Content: content},
+	}
+
+	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	mc.On("HybridSearch", mock.Anything, collection, "long", 20, 60, "").Return(results, nil)
+
+	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
+		"path":  dir,
+		"query": "long",
+	}))
+	require.NoError(t, err)
+	assert.False(t, res.IsError)
+
+	text := resultText(t, res)
+	assert.Contains(t, text, "line 40")
+	assert.NotContains(t, text, "line 41")
+	assert.Contains(t, text, "Content truncated")
+}
+
+func TestHandleSearch_ContentTruncationOptionsCanBeDisabled(t *testing.T) {
+	mc := mocks.NewMockVectorClient(t)
+	sm := mocks.NewMockStatusManager(t)
+	sp := mocks.NewMockSplitter(t)
+	h := newTestHandler(t, mc, sm, sp, nil)
+
+	dir := t.TempDir()
+	collection := snapshot.CollectionName(dir)
+	content := strings.Repeat("x", 2100)
+	results := []milvus.SearchResult{
+		{RelativePath: "long.go", StartLine: 1, EndLine: 1, FileExtension: "go", Content: content},
+	}
+
+	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	mc.On("HybridSearch", mock.Anything, collection, "long", 20, 60, "").Return(results, nil)
+
+	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
+		"path":            dir,
+		"query":           "long",
+		"maxContentLines": float64(0),
+		"maxContentChars": float64(0),
+	}))
+	require.NoError(t, err)
+	assert.False(t, res.IsError)
+
+	text := resultText(t, res)
+	assert.Contains(t, text, content)
+	assert.NotContains(t, text, "Content truncated")
+}
+
+func TestHandleSearch_ContentTruncationHonorsExplicitCharCap(t *testing.T) {
+	mc := mocks.NewMockVectorClient(t)
+	sm := mocks.NewMockStatusManager(t)
+	sp := mocks.NewMockSplitter(t)
+	h := newTestHandler(t, mc, sm, sp, nil)
+
+	dir := t.TempDir()
+	collection := snapshot.CollectionName(dir)
+	results := []milvus.SearchResult{
+		{RelativePath: "long.go", StartLine: 1, EndLine: 1, FileExtension: "go", Content: "1234567890"},
+	}
+
+	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	mc.On("HybridSearch", mock.Anything, collection, "long", 20, 60, "").Return(results, nil)
+
+	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
+		"path":            dir,
+		"query":           "long",
+		"maxContentLines": float64(0),
+		"maxContentChars": float64(5),
+	}))
+	require.NoError(t, err)
+	assert.False(t, res.IsError)
+
+	text := resultText(t, res)
+	assert.Contains(t, text, "12345")
+	assert.NotContains(t, text, "67890")
+	assert.Contains(t, text, "Content truncated")
+}
+
+func TestHandleSearch_MergesAdjacentSameFileHitsBeforeLimit(t *testing.T) {
+	mc := mocks.NewMockVectorClient(t)
+	sm := mocks.NewMockStatusManager(t)
+	sp := mocks.NewMockSplitter(t)
+	h := newTestHandler(t, mc, sm, sp, nil)
+
+	dir := t.TempDir()
+	collection := snapshot.CollectionName(dir)
+	results := []milvus.SearchResult{
+		{RelativePath: "main.go", StartLine: 1, EndLine: 2, FileExtension: "go", Content: "line 1\nline 2"},
+		{RelativePath: "main.go", StartLine: 3, EndLine: 4, FileExtension: "go", Content: "line 3\nline 4"},
+		{RelativePath: "other.go", StartLine: 1, EndLine: 2, FileExtension: "go", Content: "other"},
+	}
+
+	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	mc.On("HybridSearch", mock.Anything, collection, "test", 20, 60, "").Return(results, nil)
+
+	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
+		"path":  dir,
+		"query": "test",
+		"limit": float64(1),
+	}))
+	require.NoError(t, err)
+	assert.False(t, res.IsError)
+
+	text := resultText(t, res)
+	assert.Contains(t, text, "Found 1 results")
+	assert.Contains(t, text, "main.go (lines 1-4)")
+	assert.Contains(t, text, "line 1\nline 2\nline 3\nline 4")
+	assert.NotContains(t, text, "other.go")
+}
+
+func TestMergeSearchResultsDeduplicatesOverlappingSameFileHits(t *testing.T) {
+	results := []milvus.SearchResult{
+		{RelativePath: "main.go", StartLine: 1, EndLine: 3, FileExtension: "go", Content: "line 1\nline 2\nline 3"},
+		{RelativePath: "main.go", StartLine: 3, EndLine: 5, FileExtension: "go", Content: "line 3\nline 4\nline 5"},
+	}
+
+	merged := mergeSearchResults(results)
+
+	require.Len(t, merged, 1)
+	assert.Equal(t, 1, merged[0].StartLine)
+	assert.Equal(t, 5, merged[0].EndLine)
+	assert.Equal(t, "line 1\nline 2\nline 3\nline 4\nline 5", merged[0].Content)
+}
+
+func TestMergeSearchResultsDeduplicatesSameStartContainedMultilineHits(t *testing.T) {
+	results := []milvus.SearchResult{
+		{RelativePath: "main.go", StartLine: 1, EndLine: 3, FileExtension: "go", Content: "line 1\nline 2\nline 3"},
+		{RelativePath: "main.go", StartLine: 1, EndLine: 2, FileExtension: "go", Content: "line 1\nline 2"},
+	}
+
+	merged := mergeSearchResults(results)
+
+	require.Len(t, merged, 1)
+	assert.Equal(t, 1, merged[0].StartLine)
+	assert.Equal(t, 3, merged[0].EndLine)
+	assert.Equal(t, "line 1\nline 2\nline 3", merged[0].Content)
+}
+
+func TestMergeSearchResultsPreservesDistinctSameLineChunkContent(t *testing.T) {
+	results := []milvus.SearchResult{
+		{RelativePath: "minified.js", StartLine: 1, EndLine: 1, FileExtension: "js", Content: "function alpha(){return beta"},
+		{RelativePath: "minified.js", StartLine: 1, EndLine: 1, FileExtension: "js", Content: "return beta+gamma;}"},
+	}
+
+	merged := mergeSearchResults(results)
+
+	require.Len(t, merged, 1)
+	assert.Equal(t, 1, merged[0].StartLine)
+	assert.Equal(t, 1, merged[0].EndLine)
+	assert.Equal(t, "function alpha(){return beta+gamma;}", merged[0].Content)
 }
 
 func TestHandleSearch_RequestedLimitTruncatesAfterRerank(t *testing.T) {

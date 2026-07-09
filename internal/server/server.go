@@ -36,7 +36,10 @@ func New(cfg *config.Config, h *handler.Handler) *server.MCPServer {
 		mcp.WithDescription("Run a natural-language semantic search against a previously indexed local codebase."),
 		mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path to an indexed codebase root or subdirectory. Hint: Use your current working directory if unsure.")),
 		mcp.WithString("query", mcp.Required(), mcp.Description("Natural-language description of the code, behavior, or symbols to find.")),
-		mcp.WithNumber("limit", mcp.Description("Maximum results to return (default 10, max 20)."), mcp.DefaultNumber(10)),
+		mcp.WithNumber("limit", mcp.Description("Maximum results to return (recommended default 5, max 20)."), mcp.DefaultNumber(5)),
+		mcp.WithBoolean("metadataOnly", mcp.Description("Omit code content and code fences, returning only result headers and metadata (default false)."), mcp.DefaultBool(false)),
+		mcp.WithNumber("maxContentLines", mcp.Description("Maximum content lines per result (default 40; 0 disables the line cap)."), mcp.DefaultNumber(40)),
+		mcp.WithNumber("maxContentChars", mcp.Description("Maximum content characters per result (default 2000; 0 disables the character cap)."), mcp.DefaultNumber(2000)),
 		mcp.WithArray("extensionFilter", mcp.Description("Restrict results to these file extensions (for example '.go', '.ts')."), mcp.WithStringItems()),
 	)
 	s.AddTool(searchTool, h.HandleSearch)

@@ -144,18 +144,58 @@ func TestNew_IndexCodebaseAsyncDefaultsToTrue(t *testing.T) {
 	assert.Equal(t, "boolean", asyncProperty["type"])
 }
 
-func TestNew_SearchCodeLimitDescriptionMatchesBackendCap(t *testing.T) {
+func TestNew_SearchCodeOutputOptionsExposeTokenEfficiencyDefaults(t *testing.T) {
 	s := newTestServer(t)
 
 	properties := toolProperties(t, s, "search_code")
 	limit, ok := properties["limit"].(map[string]any)
 	require.True(t, ok, "search_code missing limit property")
 	assert.Equal(t, "number", limit["type"])
-	assert.InDelta(t, 10, limit["default"], 0)
+	assert.InDelta(t, 5, limit["default"], 0)
 
 	description := toolPropertyDescription(t, s, "search_code", "limit")
-	for _, fragment := range []string{"default 10", "max 20"} {
+	for _, fragment := range []string{"default 5", "max 20"} {
 		assert.Contains(t, description, fragment)
+	}
+
+	cases := []struct {
+		name        string
+		typeName    string
+		defaultWant any
+		description []string
+	}{
+		{
+			name:        "metadataOnly",
+			typeName:    "boolean",
+			defaultWant: false,
+			description: []string{"Omit code content", "default false"},
+		},
+		{
+			name:        "maxContentLines",
+			typeName:    "number",
+			defaultWant: float64(40),
+			description: []string{"Maximum content lines", "default 40", "0 disables"},
+		},
+		{
+			name:        "maxContentChars",
+			typeName:    "number",
+			defaultWant: float64(2000),
+			description: []string{"Maximum content characters", "default 2000", "0 disables"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			property, ok := properties[tc.name].(map[string]any)
+			require.True(t, ok, "search_code missing %s property", tc.name)
+			assert.Equal(t, tc.typeName, property["type"])
+			assert.Equal(t, tc.defaultWant, property["default"])
+
+			description := toolPropertyDescription(t, s, "search_code", tc.name)
+			for _, fragment := range tc.description {
+				assert.Contains(t, description, fragment)
+			}
+		})
 	}
 }
 
