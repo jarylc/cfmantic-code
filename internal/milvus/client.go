@@ -41,10 +41,11 @@ type VectorClient interface {
 
 // Client is a thin HTTP client for the cf-workers-milvus Cloudflare Worker.
 type Client struct {
-	baseURL        string
-	authToken      string
-	rerankStrategy string
-	httpClient     *http.Client
+	baseURL              string
+	authToken            string
+	rerankStrategy       string
+	searchMinRerankScore *float64
+	httpClient           *http.Client
 }
 
 // NewClient creates a new Client with a 300-second HTTP timeout.
@@ -67,6 +68,11 @@ func (c *Client) SetRerankStrategy(strategy string) {
 	}
 
 	c.rerankStrategy = strategy
+}
+
+// SetSearchMinRerankScore sets the optional inclusive Workers AI score threshold.
+func (c *Client) SetSearchMinRerankScore(score *float64) {
+	c.searchMinRerankScore = score
 }
 
 // Entity represents a document chunk stored in the vector database.
@@ -284,6 +290,11 @@ func (c *Client) Search(ctx context.Context, collection, query string, limit int
 // HybridSearch performs a combined dense + sparse (BM25) search with configurable re-ranking.
 // Pass a non-empty filter to apply a Milvus filter expression (e.g. `fileExtension in ["go"]`).
 func (c *Client) HybridSearch(ctx context.Context, collection, query string, limit, rrfK int, filter string) ([]SearchResult, error) {
+	rerankParams := map[string]any{"k": rrfK}
+	if c.searchMinRerankScore != nil {
+		rerankParams["minScore"] = *c.searchMinRerankScore
+	}
+
 	body := map[string]any{
 		"collectionName": collection,
 		"search": []map[string]any{
@@ -292,7 +303,7 @@ func (c *Client) HybridSearch(ctx context.Context, collection, query string, lim
 		},
 		"rerank": map[string]any{
 			"strategy": c.rerankStrategy,
-			"params":   map[string]any{"k": rrfK},
+			"params":   rerankParams,
 		},
 		"limit":        limit,
 		"outputFields": []string{"content", "relativePath", "startLine", "endLine", "fileExtension", "metadata"},

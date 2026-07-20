@@ -7,9 +7,12 @@ import (
 	"cfmantic-code/internal/snapshot"
 	"cfmantic-code/internal/splitter"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync"
@@ -18,6 +21,7 @@ import (
 	filesync "cfmantic-code/internal/sync"
 
 	"github.com/mark3labs/mcp-go/server"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -108,6 +112,38 @@ func TestRun_ServerErrorExitsNonZeroAfterCleanup(t *testing.T) {
 
 	require.Equal(t, 1, run())
 	require.Equal(t, []string{"load-config", "start-sync", "new-stdio", "listen", "stop-sync"}, rec.snapshot())
+}
+
+func TestNewMilvusClient_WiresSearchMinimumRerankScore(t *testing.T) {
+	var request map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode request: %v", err)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"code":0,"data":[],"message":""}`)
+	}))
+	defer srv.Close()
+
+	minScore := 0.4
+	cfg := testMainConfig()
+	cfg.WorkerURL = srv.URL
+	cfg.SearchMinRerankScore = &minScore
+
+	client, err := newMilvusClient(cfg)
+	require.NoError(t, err)
+
+	_, err = client.HybridSearch(context.Background(), "test", "query", 5, 60, "")
+	require.NoError(t, err)
+
+	rerank, ok := request["rerank"].(map[string]any)
+	require.True(t, ok)
+	params, ok := rerank["params"].(map[string]any)
+	require.True(t, ok)
+	assert.InDelta(t, 0.4, params["minScore"], 0)
 }
 
 func TestRun_CleanShutdownExitsZeroAfterCleanup(t *testing.T) {
@@ -210,7 +246,7 @@ func TestRunWithContext_ContextCancellationReturnsCleanly(t *testing.T) {
 	require.Equal(t, []string{"load-config", "start-sync", "new-stdio", "listen", "context-canceled", "stop-sync"}, rec.snapshot())
 }
 
-func TestRunWithContext_DoesNotAutoTrackStartupWorkingDirectory(t *testing.T) {
+func TestRunWithContext_AutoTracksIndexedStartupWorkingDirectory(t *testing.T) {
 	cfg := testMainConfig()
 	rec := &eventRecorder{}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -270,7 +306,7 @@ func TestRunWithContext_DoesNotAutoTrackStartupWorkingDirectory(t *testing.T) {
 	})
 
 	require.NoError(t, runWithContext(ctx))
-	require.False(t, trackedAtStart)
+	require.True(t, trackedAtStart)
 	require.Equal(t, []string{"load-config", "start-sync", "new-stdio", "listen", "context-canceled", "stop-sync"}, rec.snapshot())
 }
 

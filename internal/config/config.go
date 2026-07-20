@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"runtime"
 	"strconv"
@@ -11,18 +12,20 @@ import (
 
 // Sentinel errors for config validation.
 var (
-	ErrWorkerURLRequired        = errors.New("WORKER_URL is required")
-	ErrAuthTokenRequired        = errors.New("AUTH_TOKEN is required")
-	ErrInvalidSplitterType      = errors.New("SPLITTER_TYPE must be \"ast\" or \"text\"")
-	ErrInvalidEmbeddingDim      = errors.New("EMBEDDING_DIMENSION must be a positive integer")
-	ErrInvalidChunkSize         = errors.New("CHUNK_SIZE must be a positive integer")
-	ErrInvalidChunkOverlap      = errors.New("CHUNK_OVERLAP must be >= 0 and less than CHUNK_SIZE")
-	ErrInvalidRerankStrategy    = errors.New("RERANK_STRATEGY must be one of \"workers_ai\" or \"rrf\"")
-	ErrSyncIntervalNegative     = errors.New("SYNC_INTERVAL must be >= 0 (0 = disabled)")
-	ErrInvalidIndexConcurrency  = errors.New("INDEX_CONCURRENCY must be a positive integer")
-	ErrInvalidInsertBatchSize   = errors.New("INSERT_BATCH_SIZE must be a positive integer")
-	ErrInvalidInsertConcurrency = errors.New("INSERT_CONCURRENCY must be a positive integer")
-	ErrInvalidDesktopNotify     = errors.New("DESKTOP_NOTIFICATIONS must be a boolean")
+	ErrWorkerURLRequired              = errors.New("WORKER_URL is required")
+	ErrAuthTokenRequired              = errors.New("AUTH_TOKEN is required")
+	ErrInvalidSplitterType            = errors.New("SPLITTER_TYPE must be \"ast\" or \"text\"")
+	ErrInvalidEmbeddingDim            = errors.New("EMBEDDING_DIMENSION must be a positive integer")
+	ErrInvalidChunkSize               = errors.New("CHUNK_SIZE must be a positive integer")
+	ErrInvalidChunkOverlap            = errors.New("CHUNK_OVERLAP must be >= 0 and less than CHUNK_SIZE")
+	ErrInvalidRerankStrategy          = errors.New("RERANK_STRATEGY must be one of \"workers_ai\" or \"rrf\"")
+	ErrInvalidSearchMinRerankScore    = errors.New("SEARCH_MIN_RERANK_SCORE must be a finite number between 0 and 1")
+	ErrSearchMinRerankScoreRequiresAI = errors.New("SEARCH_MIN_RERANK_SCORE requires RERANK_STRATEGY=workers_ai")
+	ErrSyncIntervalNegative           = errors.New("SYNC_INTERVAL must be >= 0 (0 = disabled)")
+	ErrInvalidIndexConcurrency        = errors.New("INDEX_CONCURRENCY must be a positive integer")
+	ErrInvalidInsertBatchSize         = errors.New("INSERT_BATCH_SIZE must be a positive integer")
+	ErrInvalidInsertConcurrency       = errors.New("INSERT_CONCURRENCY must be a positive integer")
+	ErrInvalidDesktopNotify           = errors.New("DESKTOP_NOTIFICATIONS must be a boolean")
 )
 
 const defaultRerankStrategy = "workers_ai"
@@ -39,13 +42,14 @@ type Config struct {
 	CustomIgnore         []string
 	ServerName           string
 	ServerVersion        string
-	SplitterType         string // SPLITTER_TYPE env var: "ast" (default) or "text"
-	RerankStrategy       string // RERANK_STRATEGY env var: Milvus hybrid rerank strategy ("workers_ai" or "rrf", default workers_ai)
-	SyncInterval         int    // SYNC_INTERVAL env var: seconds between sync cycles (default 60)
-	IndexConcurrency     int    // INDEX_CONCURRENCY env var: parallel workers for indexing (default: NumCPU)
-	InsertBatchSize      int    // INSERT_BATCH_SIZE env var: entities per insert request (default 192)
-	InsertConcurrency    int    // INSERT_CONCURRENCY env var: concurrent HTTP insert calls to worker (default 2)
-	DesktopNotifications bool   // DESKTOP_NOTIFICATIONS env var: enable best-effort OS notifications (default false)
+	SplitterType         string   // SPLITTER_TYPE env var: "ast" (default) or "text"
+	RerankStrategy       string   // RERANK_STRATEGY env var: Milvus hybrid rerank strategy ("workers_ai" or "rrf", default workers_ai)
+	SearchMinRerankScore *float64 // SEARCH_MIN_RERANK_SCORE env var: optional inclusive Workers AI score threshold [0,1]
+	SyncInterval         int      // SYNC_INTERVAL env var: seconds between sync cycles (default 60)
+	IndexConcurrency     int      // INDEX_CONCURRENCY env var: parallel workers for indexing (default: NumCPU)
+	InsertBatchSize      int      // INSERT_BATCH_SIZE env var: entities per insert request (default 192)
+	InsertConcurrency    int      // INSERT_CONCURRENCY env var: concurrent HTTP insert calls to worker (default 2)
+	DesktopNotifications bool     // DESKTOP_NOTIFICATIONS env var: enable best-effort OS notifications (default false)
 }
 
 func defaultIndexConcurrency(cpuCount int) int {
@@ -144,6 +148,21 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("%w, got %q", ErrInvalidRerankStrategy, rerankStrategy)
 	}
 
+	var searchMinRerankScore *float64
+
+	if v := os.Getenv("SEARCH_MIN_RERANK_SCORE"); v != "" {
+		n, err := strconv.ParseFloat(v, 64)
+		if err != nil || math.IsNaN(n) || math.IsInf(n, 0) || n < 0 || n > 1 {
+			return nil, fmt.Errorf("%w: %s", ErrInvalidSearchMinRerankScore, v)
+		}
+
+		if rerankStrategy != defaultRerankStrategy {
+			return nil, ErrSearchMinRerankScoreRequiresAI
+		}
+
+		searchMinRerankScore = &n
+	}
+
 	syncInterval := 60
 
 	if v := os.Getenv("SYNC_INTERVAL"); v != "" {
@@ -214,6 +233,7 @@ func Load() (*Config, error) {
 		ServerVersion:        serverVersion,
 		SplitterType:         splitterType,
 		RerankStrategy:       rerankStrategy,
+		SearchMinRerankScore: searchMinRerankScore,
 		SyncInterval:         syncInterval,
 		IndexConcurrency:     indexConcurrency,
 		InsertBatchSize:      insertBatchSize,

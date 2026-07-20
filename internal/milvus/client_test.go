@@ -848,6 +848,7 @@ func TestHybridSearch_UsesConfiguredRerankStrategy(t *testing.T) {
 		}
 
 		assert.InDelta(t, 60, params["k"], 0)
+		assert.NotContains(t, params, "minScore")
 
 		writeAPIResp(w, 0, []SearchResult{}, "")
 	}))
@@ -855,6 +856,38 @@ func TestHybridSearch_UsesConfiguredRerankStrategy(t *testing.T) {
 
 	c := NewClient(srv.URL, "token")
 	c.SetRerankStrategy("rrf")
+
+	results, err := c.HybridSearch(context.Background(), "my-coll", "hybrid query", 5, 60, "")
+	require.NoError(t, err)
+	assert.Empty(t, results)
+}
+
+func TestHybridSearch_UsesConfiguredMinimumRerankScore(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&body)) {
+			return
+		}
+
+		rerank, ok := body["rerank"].(map[string]any)
+		if !assert.True(t, ok) {
+			return
+		}
+
+		params, ok := rerank["params"].(map[string]any)
+		if !assert.True(t, ok) {
+			return
+		}
+
+		assert.InDelta(t, 60, params["k"], 0)
+		assert.InDelta(t, 0.4, params["minScore"], 0)
+		writeAPIResp(w, 0, []SearchResult{}, "")
+	}))
+	defer srv.Close()
+
+	minScore := 0.4
+	c := NewClient(srv.URL, "token")
+	c.SetSearchMinRerankScore(&minScore)
 
 	results, err := c.HybridSearch(context.Background(), "my-coll", "hybrid query", 5, 60, "")
 	require.NoError(t, err)

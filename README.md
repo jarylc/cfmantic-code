@@ -115,6 +115,7 @@ Common optional variables:
 - `SYNC_INTERVAL`: seconds between background sync runs, default `60`, set `0` to disable
 - `SPLITTER_TYPE`: `ast` or `text`, default `ast`
 - `RERANK_STRATEGY`: workers hybrid rerank strategy, must be `workers_ai` or `rrf`, default `workers_ai`
+- `SEARCH_MIN_RERANK_SCORE`: optional inclusive Workers AI score threshold in `[0,1]` for `search_code`; unset by default (disabled). `0.4` is a calibration starting point, not a universal default, and this setting requires `RERANK_STRATEGY=workers_ai`. Only actual Workers AI scores are filtered; unscored RRF fallback results are retained when reranking is partial, unavailable, or has no usable query/candidates.
 - `CUSTOM_IGNORE_PATTERNS`: comma-separated list of ignore patterns
 
 Advanced optional variables:

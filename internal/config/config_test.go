@@ -15,6 +15,7 @@ var allConfigEnvVars = []string{
 	"WORKER_URL",
 	"AUTH_TOKEN",
 	"RERANK_STRATEGY",
+	"SEARCH_MIN_RERANK_SCORE",
 	"EMBEDDING_DIMENSION",
 	"CHUNK_SIZE",
 	"CHUNK_OVERLAP",
@@ -87,6 +88,7 @@ func TestLoad_HappyPath(t *testing.T) {
 	assert.Equal(t, "https://worker.example.com", cfg.WorkerURL)
 	assert.Equal(t, "my-token", cfg.AuthToken)
 	assert.Equal(t, "rrf", cfg.RerankStrategy)
+	assert.Nil(t, cfg.SearchMinRerankScore)
 	assert.Equal(t, 512, cfg.EmbeddingDimension)
 	assert.Equal(t, 1000, cfg.ChunkSize)
 	assert.Equal(t, 100, cfg.ChunkOverlap)
@@ -165,6 +167,7 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, 192, cfg.InsertBatchSize, "default INSERT_BATCH_SIZE")
 	assert.Equal(t, 4, cfg.InsertConcurrency, "default INSERT_CONCURRENCY")
 	assert.Equal(t, "workers_ai", cfg.RerankStrategy, "default RERANK_STRATEGY")
+	assert.Nil(t, cfg.SearchMinRerankScore, "default SEARCH_MIN_RERANK_SCORE")
 	assert.False(t, cfg.DesktopNotifications, "default DESKTOP_NOTIFICATIONS")
 	assert.Nil(t, cfg.CustomIgnore, "default CUSTOM_IGNORE_PATTERNS")
 }
@@ -178,6 +181,64 @@ func TestLoad_RerankStrategyOverride(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, cfg)
 	assert.Equal(t, "rrf", cfg.RerankStrategy)
+}
+
+func TestLoad_SearchMinRerankScore(t *testing.T) {
+	tests := []struct {
+		name         string
+		value        string
+		strategy     string
+		wantScore    float64
+		wantScoreSet bool
+		wantErr      string
+	}{
+		{name: "unset"},
+		{name: "zero", value: "0", wantScore: 0, wantScoreSet: true},
+		{name: "one", value: "1", wantScore: 1, wantScoreSet: true},
+		{name: "calibration starting point", value: "0.4", wantScore: 0.4, wantScoreSet: true},
+		{name: "malformed", value: "not-a-number", wantErr: "SEARCH_MIN_RERANK_SCORE"},
+		{name: "NaN", value: "NaN", wantErr: "SEARCH_MIN_RERANK_SCORE"},
+		{name: "positive infinity", value: "+Inf", wantErr: "SEARCH_MIN_RERANK_SCORE"},
+		{name: "negative infinity", value: "-Inf", wantErr: "SEARCH_MIN_RERANK_SCORE"},
+		{name: "negative", value: "-0.1", wantErr: "SEARCH_MIN_RERANK_SCORE"},
+		{name: "above one", value: "1.1", wantErr: "SEARCH_MIN_RERANK_SCORE"},
+		{name: "rrf strategy is incompatible", value: "0.4", strategy: "rrf", wantErr: "SEARCH_MIN_RERANK_SCORE requires"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			setRequired(t)
+
+			if tc.strategy != "" {
+				t.Setenv("RERANK_STRATEGY", tc.strategy)
+			}
+
+			if tc.value != "" {
+				t.Setenv("SEARCH_MIN_RERANK_SCORE", tc.value)
+			}
+
+			cfg, err := Load()
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				assert.Nil(t, cfg)
+				assert.Contains(t, err.Error(), tc.wantErr)
+
+				return
+			}
+
+			require.NoError(t, err)
+			require.NotNil(t, cfg)
+
+			if !tc.wantScoreSet {
+				assert.Nil(t, cfg.SearchMinRerankScore)
+				return
+			}
+
+			require.NotNil(t, cfg.SearchMinRerankScore)
+			assert.InDelta(t, tc.wantScore, *cfg.SearchMinRerankScore, 0)
+		})
+	}
 }
 
 func TestDefaultIndexConcurrency(t *testing.T) {

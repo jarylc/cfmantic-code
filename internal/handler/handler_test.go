@@ -4537,6 +4537,9 @@ func TestIncrementalIndex_AfterPartialBackground(t *testing.T) {
 
 	waitForDone(t, done2, 5*time.Second)
 
+	// SetIndexed signals before AfterSuccess's final GetStatus call.
+	requireIndexSemaphoreReleased(t, h)
+
 	// Verify the mock was called the expected number of times.
 	mc.AssertExpectations(t)
 }

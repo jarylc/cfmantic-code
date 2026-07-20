@@ -53,6 +53,7 @@ var (
 		}
 
 		mc.SetRerankStrategy(cfg.RerankStrategy)
+		mc.SetSearchMinRerankScore(cfg.SearchMinRerankScore)
 
 		return mc, nil
 	}
@@ -165,6 +166,8 @@ func runWithContext(ctx context.Context) error {
 	log.Printf("Starting %s v%s", cfg.ServerName, cfg.ServerVersion)
 
 	if syncMgr != nil {
+		syncMgr.AutoTrackWorkingDirectory(handler.CanonicalizePath)
+
 		startSyncManager(syncMgr)
 		defer stopSyncManager(syncMgr)
 
