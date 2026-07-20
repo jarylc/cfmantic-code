@@ -9,9 +9,11 @@ import (
 )
 
 const (
-	serverInstructions    = "Semantic code search for local codebases. First call index_codebase on the working directory. Initial indexing and reindexing always start in the background. If async=false is sent for those runs, it is ignored because they may exceed MCP client timeouts; use get_indexing_status for progress. Incremental refreshes can still use async=false to wait for completion. Then call search_code on that indexed working directory or one of its subdirectories. Use clear_index to remove stored index data."
-	indexToolDescription  = "Create or refresh a semantic index for a local codebase. Initial indexing and reindexing always start in the background; incremental refreshes can still wait with async=false, or you can poll with get_indexing_status."
-	indexAsyncDescription = "Run asynchronously by default. Ignored for an initial full index or any reindex because those runs may exceed MCP client timeouts; set async=false only to wait for incremental refresh completion."
+	serverInstructions           = "Semantic code search for local codebases. First call index_codebase on the working directory. Initial indexing and reindexing always start in the background. If async=false is sent for those runs, it is ignored because they may exceed MCP client timeouts; use get_indexing_status for progress. Incremental refreshes can still use async=false to wait for completion. Then call search_code on that indexed working directory or one of its subdirectories. Use clear_index to remove stored index data."
+	indexToolDescription         = "Create or refresh a semantic index for a local codebase. Initial indexing and reindexing always start in the background; incremental refreshes can still wait with async=false, or you can poll with get_indexing_status."
+	indexAsyncDescription        = "Run asynchronously by default. Ignored for an initial full index or any reindex because those runs may exceed MCP client timeouts; set async=false only to wait for incremental refresh completion."
+	searchSymbolsToolDescription = "Search for function, method, class, struct, interface, and type definitions across a local codebase using tree-sitter symbol extraction. No prior indexing required."
+	traceSymbolToolDescription   = "Trace lexical occurrences of a symbol (definitions, calls, references) across a local codebase using tree-sitter symbol extraction. This is lexical classification, not a resolved call graph. No prior indexing required."
 )
 
 // New creates and returns an MCPServer with all tools registered.
@@ -43,6 +45,22 @@ func New(cfg *config.Config, h *handler.Handler) *server.MCPServer {
 		mcp.WithArray("extensionFilter", mcp.Description("Restrict results to these file extensions (for example '.go', '.ts')."), mcp.WithStringItems()),
 	)
 	s.AddTool(searchTool, h.HandleSearch)
+
+	searchSymbolsTool := mcp.NewTool("search_symbols",
+		mcp.WithDescription(searchSymbolsToolDescription),
+		mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path to a codebase root or subdirectory. Hint: Use your current working directory if unsure.")),
+		mcp.WithString("query", mcp.Description("Substring or glob match on symbol name. If omitted, all symbols are returned.")),
+		mcp.WithArray("kinds", mcp.Description("Filter by symbol kinds (e.g. \"function\", \"method\", \"class\", \"struct\", \"interface\", \"type\")."), mcp.WithStringItems()),
+	)
+	s.AddTool(searchSymbolsTool, h.HandleSearchSymbols)
+
+	traceSymbolTool := mcp.NewTool("trace_symbol",
+		mcp.WithDescription(traceSymbolToolDescription),
+		mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path to a codebase root or subdirectory. Hint: Use your current working directory if unsure.")),
+		mcp.WithString("symbol", mcp.Required(), mcp.Description("Exact symbol/identifier name to trace (e.g. \"HandleSearch\").")),
+		mcp.WithString("mode", mcp.Description("Trace mode: \"callers\" (calls inside functions), \"references\" (calls and references, excluding definitions), \"definitions\" (definitions only), or \"all\" (default)."), mcp.DefaultString("all")),
+	)
+	s.AddTool(traceSymbolTool, h.HandleTraceSymbol)
 
 	clearTool := mcp.NewTool("clear_index",
 		mcp.WithDescription("Remove the stored semantic index and local index state for a codebase."),

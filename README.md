@@ -161,6 +161,12 @@ sequenceDiagram
     Note right of W: clear_index removes the remote collection
 ```
 
+## MCP Tools
+
+The server exposes the following tools. `index_codebase`, `search_code`, `clear_index`, and `get_indexing_status` operate on the semantic index and are illustrated in the [Samples](#samples).
+
+The two symbol tools, `search_symbols` and `trace_symbol`, uses tree-sitter symbol extraction directly and require **no prior indexing**.
+
 ## Development
 
 Tagged GitHub releases (`v*`) are built on GitHub runners and published at https://github.com/jarylc/cfmantic-code/releases. `make build` embeds the current git tag/version into the binary.

@@ -115,6 +115,62 @@ func TestNew_PathPropertiesDescribeStableScopeConstraints(t *testing.T) {
 	}
 }
 
+func TestNew_SearchSymbolsToolRegistered(t *testing.T) {
+	s := newTestServer(t)
+
+	properties := toolProperties(t, s, "search_symbols")
+
+	pathProp, ok := properties["path"].(map[string]any)
+	require.True(t, ok, "search_symbols missing path property")
+	assert.Equal(t, "string", pathProp["type"])
+
+	required := toolRequiredProperties(t, s, "search_symbols")
+	assert.Contains(t, required, "path")
+	assert.NotContains(t, required, "query")
+	assert.NotContains(t, required, "kinds")
+
+	queryProp, ok := properties["query"].(map[string]any)
+	require.True(t, ok, "search_symbols missing query property")
+	assert.Equal(t, "string", queryProp["type"])
+
+	kindsProp, ok := properties["kinds"].(map[string]any)
+	require.True(t, ok, "search_symbols missing kinds property")
+	assert.Equal(t, "array", kindsProp["type"])
+}
+
+func TestNew_TraceSymbolToolRegistered(t *testing.T) {
+	s := newTestServer(t)
+
+	properties := toolProperties(t, s, "trace_symbol")
+
+	pathProp, ok := properties["path"].(map[string]any)
+	require.True(t, ok, "trace_symbol missing path property")
+	assert.Equal(t, "string", pathProp["type"])
+
+	symbolProp, ok := properties["symbol"].(map[string]any)
+	require.True(t, ok, "trace_symbol missing symbol property")
+	assert.Equal(t, "string", symbolProp["type"])
+
+	modeProp, ok := properties["mode"].(map[string]any)
+	require.True(t, ok, "trace_symbol missing mode property")
+	assert.Equal(t, "string", modeProp["type"])
+
+	required := toolRequiredProperties(t, s, "trace_symbol")
+	assert.Contains(t, required, "path")
+	assert.Contains(t, required, "symbol")
+	assert.NotContains(t, required, "mode")
+}
+
+func TestNew_TraceSymbolDescriptionExplainsLexicalClassification(t *testing.T) {
+	s := newTestServer(t)
+	tool, ok := s.ListTools()["trace_symbol"]
+	require.True(t, ok, "trace_symbol tool is not registered")
+
+	description := tool.Tool.Description
+	assert.Contains(t, description, "lexical")
+	assert.Contains(t, description, "not a resolved call graph")
+}
+
 func TestNew_InstructionsExplainIndexCodebaseTimeoutBehavior(t *testing.T) {
 	s := newTestServer(t)
 
