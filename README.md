@@ -123,6 +123,7 @@ Advanced optional variables:
 - `EMBEDDING_DIMENSION`: embedding size, must be positive, default `1024`
 - `CHUNK_SIZE`: chunk size, must be positive, default `4000`
 - `CHUNK_OVERLAP`: chunk overlap, must be `>= 0` and `< CHUNK_SIZE`, default `200`
+- `INCREMENTAL_SYNC_TIMEOUT_SECONDS`: maximum duration for one manual or background incremental sync, must be positive, default `600`
 - `INDEX_CONCURRENCY`: indexing worker count, default is your CPU count / 2
 - `INSERT_BATCH_SIZE`: entities per insert request, default `192`
 - `INSERT_CONCURRENCY`: concurrent insert requests, default `4`
@@ -167,6 +168,20 @@ sequenceDiagram
 The server exposes the following tools. `index_codebase`, `search_code`, `clear_index`, and `get_indexing_status` operate on the semantic index and are illustrated in the [Samples](#samples).
 
 The two symbol tools, `search_symbols` and `trace_symbol`, uses tree-sitter symbol extraction directly and require **no prior indexing**.
+
+### Index update failures
+
+Index and sync insert requests retry automatically when the backend replies with a retryable error. A retryable error is a message that contains `try again`, for example `AiError: 3040: Capacity temporarily exceeded, please try again.` The client makes up to 5 total attempts.
+
+When all attempts fail, the codebase status stays `failed`, but `search_code` remains available and searches the existing index. The result starts with this warning:
+
+> The last index update failed after all retry attempts. Results may be incomplete.
+
+The warning also appears when a parent path with a retryable failure serves the search for a child path. Permanent failures still block `search_code` with `not indexed, run index_codebase first`.
+
+Background sync stores the real backend error in the snapshot, for example `sync: insert failed: AiError: 3040: Capacity temporarily exceeded, please try again.` `get_indexing_status` shows the stored error and, when it is retryable, this hint:
+
+> Partial progress was saved. Run index_codebase (without reindex) to continue where indexing left off.
 
 ## Development
 

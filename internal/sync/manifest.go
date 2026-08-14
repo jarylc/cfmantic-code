@@ -43,8 +43,9 @@ type FileEntry struct {
 }
 
 type ManifestDiff struct {
-	Manifest *FileHashMap
-	Changes  []FileChange
+	Manifest    *FileHashMap
+	OldManifest *FileHashMap
+	Changes     []FileChange
 }
 
 // FileHashMap is a flat map of file relative path to FileEntry,
@@ -106,7 +107,11 @@ func ComputeManifestDiff(files []walker.CodeFile, old *FileHashMap) *ManifestDif
 		manifest.Files[f.RelPath] = entry
 	}
 
-	return &ManifestDiff{Manifest: manifest, Changes: diffFileHashMaps(manifest, old)}
+	return &ManifestDiff{
+		Manifest:    manifest,
+		OldManifest: old,
+		Changes:     diffFileHashMaps(manifest, old),
+	}
 }
 
 func computeFileEntry(file walker.CodeFile) (FileEntry, bool) {
@@ -317,8 +322,26 @@ func (d *ManifestDiff) ProgressManifest() *FileHashMap {
 
 	progress := d.Manifest.Clone()
 	for _, change := range d.Changes {
-		if change.Type == Added || change.Type == Modified {
+		if change.Type == Added {
 			delete(progress.Files, change.RelPath)
+
+			continue
+		}
+
+		if change.Type == Modified {
+			var (
+				oldEntry FileEntry
+				ok       bool
+			)
+			if d.OldManifest != nil {
+				oldEntry, ok = d.OldManifest.Files[change.RelPath]
+			}
+
+			if ok {
+				progress.Files[change.RelPath] = oldEntry
+			} else {
+				delete(progress.Files, change.RelPath)
+			}
 		}
 	}
 

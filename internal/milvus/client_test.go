@@ -421,26 +421,35 @@ func TestDo_DoFailureMaxRetries(t *testing.T) {
 	assert.EqualValues(t, 4, callCount.Load()) // initial attempt + 3 retries
 }
 
-func TestDo_RetryAPICapacityExceeded(t *testing.T) {
+func TestInsert_RetriesRetryableAPICapacityError(t *testing.T) {
+	// Characterization: a retryable capacity error on the insert endpoint is
+	// retried up to retryableAPIMaxRetries (4) before succeeding on attempt 5.
 	stubRetryBackoff(t)
 
 	var callCount atomic.Int32
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/v2/vectordb/entities/insert", r.URL.Path)
+
 		n := callCount.Add(1)
 		if n <= 4 {
 			writeAPIResp(w, 1, nil, "AiError: 3040: Capacity temporarily exceeded, please try again.")
 			return
 		}
 
-		writeAPIResp(w, 0, nil, "")
+		writeAPIResp(w, 0, InsertResult{InsertCount: 1, InsertIDs: []string{"id1"}}, "")
 	}))
 	defer srv.Close()
 
 	c := NewClient(srv.URL, "token")
-	err := c.do(context.Background(), "/test", map[string]string{}, nil)
+	entities := []Entity{
+		{ID: "id1", Content: "foo", RelativePath: "a.go"},
+	}
+	result, err := c.Insert(context.Background(), "my-coll", entities)
 	require.NoError(t, err)
-	assert.EqualValues(t, 5, callCount.Load())
+	require.NotNil(t, result)
+	assert.Equal(t, 1, result.InsertCount)
+	assert.EqualValues(t, 5, callCount.Load()) // initial attempt + 4 retries
 }
 
 func TestDo_NonRetryableAPIError(t *testing.T) {

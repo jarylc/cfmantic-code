@@ -1474,6 +1474,276 @@ func TestHandleIndex_AlreadyIndexed_NoReindex_AsyncIgnoresRequestCancellation(t 
 	requireNoIndexLock(t, dir)
 }
 
+func TestHandleIndex_IncrementalIndex_TimeoutDuringFinalizationCleansUp(t *testing.T) {
+	allowTempDirIndexing(t)
+
+	mc := mocks.NewMockVectorClient(t)
+	sp := mocks.NewMockSplitter(t)
+	sm := mocks.NewMockStatusManager(t)
+	h := newTestHandler(t, mc, sm, sp, nil)
+	h.cfg.IncrementalSyncTimeout = time.Second
+
+	dir := t.TempDir()
+	collection := snapshot.CollectionName(dir)
+	goFile := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(goFile, []byte("package main\n"), 0o644))
+
+	oldHashes := filesync.NewFileHashMap()
+	oldHashes.Files["main.go"] = filesync.FileEntry{Hash: "stale-hash", ChunkCount: 1}
+	require.NoError(t, oldHashes.Save(filesync.HashFilePath(dir)))
+
+	sm.On("IsIndexing", dir).Return(false)
+	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	expectRemoteCollectionExists(mc, dir)
+	sm.On("SetStep", dir, "Starting incremental sync").Return()
+	sm.On("SetStep", dir, "Walking files").Return()
+	sm.On("SetStep", dir, "Computing file changes").Return()
+	sm.On("SetStep", dir, "Removing stale chunks").Return()
+	sm.On("SetStep", dir, "Indexing 1 changed files").Return()
+	sm.On("SetStep", dir, "Finalizing incremental sync").Return()
+	sm.On("SetProgress", mock.Anything, mock.Anything).Maybe()
+
+	expectSplitChunks(t, sp, "main.go", []splitter.Chunk{{Content: "package main", StartLine: 1, EndLine: 1}})
+	mc.On("Query", mock.Anything, collection, `relativePath == "main.go"`, 1).
+		Return([]milvus.Entity{{ID: "stale-chunk"}}, nil).Once()
+	mc.On("Insert", mock.Anything, collection, singleFileInsert("main.go")).
+		Return(&milvus.InsertResult{InsertCount: 1}, nil).Once()
+
+	deleteStarted := make(chan struct{})
+	deleteCanceled := make(chan struct{})
+
+	mc.On("Delete", mock.Anything, collection, mock.Anything).
+		Run(func(args mock.Arguments) {
+			ctx, ok := args.Get(0).(context.Context)
+			require.True(t, ok)
+			close(deleteStarted)
+			<-ctx.Done()
+			close(deleteCanceled)
+		}).
+		Return(context.DeadlineExceeded).Once()
+
+	failed := make(chan struct{})
+
+	sm.On("SetFailed", dir, mock.MatchedBy(func(message string) bool {
+		return strings.Contains(message, "context deadline exceeded")
+	})).
+		Run(func(mock.Arguments) { close(failed) }).
+		Return().Once()
+
+	res, err := h.HandleIndex(context.Background(), makeReq(map[string]any{
+		"path":  dir,
+		"async": true,
+	}))
+	require.NoError(t, err)
+	assert.False(t, res.IsError)
+
+	waitForDone(t, deleteStarted, 5*time.Second)
+	waitForDone(t, deleteCanceled, 5*time.Second)
+	waitForDone(t, failed, 5*time.Second)
+
+	require.Eventually(t, func() bool {
+		h.activeManualIndexMu.Lock()
+		defer h.activeManualIndexMu.Unlock()
+
+		_, active := h.activeManualIndexByPath[dir]
+
+		return !active
+	}, 5*time.Second, 5*time.Millisecond, "manual incremental index remained active")
+	requireIndexSemaphoreReleased(t, h)
+	requireNoIndexLock(t, dir)
+	sm.AssertNotCalled(t, "SetIndexed", dir, mock.Anything, mock.Anything)
+}
+
+func TestHandleIndex_IncrementalIndex_TimeoutPreservesManifestForRetry(t *testing.T) {
+	allowTempDirIndexing(t)
+
+	mc := mocks.NewMockVectorClient(t)
+	sp := mocks.NewMockSplitter(t)
+	sm := snapshot.NewManager()
+	cfg := loadTestConfig(t)
+	cfg.IncrementalSyncTimeout = time.Second
+	h := New(mc, sm, cfg, sp, nil)
+
+	dir := t.TempDir()
+	collection := snapshot.CollectionName(dir)
+	goFile := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(goFile, []byte("package main\n"), 0o644))
+	sm.SetIndexed(dir, 1, 1)
+
+	oldHashes := filesync.NewFileHashMap()
+	oldHashes.Files["main.go"] = filesync.FileEntry{Hash: "stale-hash", ChunkCount: 1}
+	require.NoError(t, oldHashes.Save(filesync.HashFilePath(dir)))
+
+	expectRemoteCollectionExists(mc, dir)
+
+	smplit := splitter.Chunk{Content: "package main", StartLine: 1, EndLine: 1}
+	expectSplitChunks(t, sp, "main.go", []splitter.Chunk{smplit})
+	mc.On("Query", mock.Anything, collection, `relativePath == "main.go"`, 1).
+		Return([]milvus.Entity{{ID: "stale-chunk"}}, nil).Twice()
+	mc.On("Insert", mock.Anything, collection, singleFileInsert("main.go")).
+		Return(&milvus.InsertResult{InsertCount: 1}, nil).Twice()
+
+	firstDeleteStarted := make(chan struct{})
+	firstDeleteCanceled := make(chan struct{})
+
+	mc.On("Delete", mock.Anything, collection, mock.Anything).
+		Run(func(args mock.Arguments) {
+			ctx, ok := args.Get(0).(context.Context)
+			require.True(t, ok)
+			close(firstDeleteStarted)
+			<-ctx.Done()
+			close(firstDeleteCanceled)
+		}).
+		Return(context.DeadlineExceeded).Once()
+
+	retryDelete := make(chan struct{})
+
+	mc.On("Delete", mock.Anything, collection, mock.Anything).
+		Run(func(mock.Arguments) { close(retryDelete) }).
+		Return(nil).Once()
+
+	res, err := h.HandleIndex(context.Background(), makeReq(map[string]any{
+		"path":  dir,
+		"async": true,
+	}))
+	require.NoError(t, err)
+	assert.False(t, res.IsError)
+
+	waitForDone(t, firstDeleteStarted, 5*time.Second)
+	waitForDone(t, firstDeleteCanceled, 5*time.Second)
+	requireIndexSemaphoreReleased(t, h)
+	requireNoIndexLock(t, dir)
+
+	info := sm.GetInfo(dir)
+	require.NotNil(t, info)
+	assert.Equal(t, snapshot.StatusFailed, info.Status)
+
+	manifest, err := filesync.LoadFileHashMap(filesync.HashFilePath(dir))
+	require.NoError(t, err)
+
+	entry, ok := manifest.Files["main.go"]
+	require.True(t, ok)
+	assert.Equal(t, "stale-hash", entry.Hash, "timed-out stale deletion must leave the old manifest entry retryable")
+
+	res, err = h.HandleIndex(context.Background(), makeReq(map[string]any{
+		"path":  dir,
+		"async": false,
+	}))
+	require.NoError(t, err)
+	assert.False(t, res.IsError)
+	assert.Contains(t, resultText(t, res), "Incremental sync complete")
+	waitForDone(t, retryDelete, 5*time.Second)
+
+	info = sm.GetInfo(dir)
+	require.NotNil(t, info)
+	assert.Equal(t, snapshot.StatusIndexed, info.Status)
+
+	manifest, err = filesync.LoadFileHashMap(filesync.HashFilePath(dir))
+	require.NoError(t, err)
+
+	entry, ok = manifest.Files["main.go"]
+	require.True(t, ok)
+	assert.NotEqual(t, "stale-hash", entry.Hash)
+	assert.Equal(t, 1, entry.ChunkCount)
+}
+
+func TestHandleIndex_IncrementalIndex_MixedTimeoutRetriesStaleChunks(t *testing.T) {
+	allowTempDirIndexing(t)
+
+	mc := mocks.NewMockVectorClient(t)
+	sp := mocks.NewMockSplitter(t)
+	sm := snapshot.NewManager()
+	cfg := loadTestConfig(t)
+	cfg.IncrementalSyncTimeout = time.Second
+	h := New(mc, sm, cfg, sp, nil)
+
+	dir := t.TempDir()
+	collection := snapshot.CollectionName(dir)
+	mainFile := filepath.Join(dir, "main.go")
+	addedFile := filepath.Join(dir, "added.go")
+
+	require.NoError(t, os.WriteFile(mainFile, []byte("package main\n"), 0o644))
+	require.NoError(t, os.WriteFile(addedFile, []byte("package added\n"), 0o644))
+	sm.SetIndexed(dir, 1, 1)
+
+	oldHashes := filesync.NewFileHashMap()
+	oldHashes.Files["main.go"] = filesync.FileEntry{Hash: "stale-hash", ChunkCount: 1}
+	require.NoError(t, oldHashes.Save(filesync.HashFilePath(dir)))
+
+	mc.On("HasCollection", mock.Anything, collection).Return(true, nil).Twice()
+	mc.On("Query", mock.Anything, collection, `relativePath == "main.go"`, 1).
+		Return([]milvus.Entity{{ID: "stale-chunk"}}, nil).Twice()
+
+	mainChunk := splitter.Chunk{Content: "package main", StartLine: 1, EndLine: 1}
+	addedChunk := splitter.Chunk{Content: "package added", StartLine: 1, EndLine: 1}
+
+	expectSplitChunks(t, sp, "main.go", []splitter.Chunk{mainChunk})
+	expectSplitChunks(t, sp, "added.go", []splitter.Chunk{addedChunk})
+	mc.On("Insert", mock.Anything, collection, mock.Anything).
+		Return(&milvus.InsertResult{InsertCount: 1}, nil).Twice()
+
+	firstDeleteStarted := make(chan struct{})
+	firstDeleteCanceled := make(chan struct{})
+
+	mc.On("Delete", mock.Anything, collection, `id in ["stale-chunk"]`).
+		Run(func(args mock.Arguments) {
+			ctx, ok := args.Get(0).(context.Context)
+			require.True(t, ok)
+			close(firstDeleteStarted)
+			<-ctx.Done()
+			close(firstDeleteCanceled)
+		}).
+		Return(context.DeadlineExceeded).Once()
+
+	retryDelete := make(chan struct{})
+
+	mc.On("Delete", mock.Anything, collection, `id in ["stale-chunk"]`).
+		Run(func(mock.Arguments) { close(retryDelete) }).
+		Return(nil).Once()
+
+	res, err := h.HandleIndex(context.Background(), makeReq(map[string]any{
+		"path":  dir,
+		"async": true,
+	}))
+	require.NoError(t, err)
+	assert.False(t, res.IsError)
+
+	waitForDone(t, firstDeleteStarted, 5*time.Second)
+	waitForDone(t, firstDeleteCanceled, 5*time.Second)
+	requireIndexSemaphoreReleased(t, h)
+	requireNoIndexLock(t, dir)
+
+	manifest, err := filesync.LoadFileHashMap(filesync.HashFilePath(dir))
+	require.NoError(t, err)
+
+	entry, ok := manifest.Files["main.go"]
+	require.True(t, ok, "modified file must remain in the partial manifest")
+	assert.Equal(t, "stale-hash", entry.Hash)
+	assert.Contains(t, manifest.Files, "added.go", "completed added files may be retained in partial progress")
+
+	res, err = h.HandleIndex(context.Background(), makeReq(map[string]any{
+		"path":  dir,
+		"async": false,
+	}))
+	require.NoError(t, err)
+	assert.False(t, res.IsError)
+	assert.Contains(t, resultText(t, res), "Incremental sync complete")
+	waitForDone(t, retryDelete, 5*time.Second)
+
+	info := sm.GetInfo(dir)
+	require.NotNil(t, info)
+	assert.Equal(t, snapshot.StatusIndexed, info.Status)
+
+	manifest, err = filesync.LoadFileHashMap(filesync.HashFilePath(dir))
+	require.NoError(t, err)
+
+	entry, ok = manifest.Files["main.go"]
+	require.True(t, ok)
+	assert.NotEqual(t, "stale-hash", entry.Hash)
+	assert.Equal(t, 1, entry.ChunkCount)
+	assert.Contains(t, manifest.Files, "added.go")
+}
+
 func TestHandleIndex_AlreadyIndexed_NoReindex_ExplicitSyncReturnsErrorOnFailure(t *testing.T) {
 	allowTempDirIndexing(t)
 
@@ -2062,7 +2332,7 @@ func TestHandleSearch_SymlinkResolved(t *testing.T) {
 	link := filepath.Join(linkParent, "link")
 	require.NoError(t, os.Symlink(realDir, link))
 
-	sm.On("GetStatus", mock.Anything).Return(snapshot.StatusNotFound)
+	sm.On("GetInfo", mock.Anything).Return((*snapshot.CodebaseInfo)(nil))
 
 	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
 		"path":  link,
@@ -2120,7 +2390,7 @@ func TestHandleSearch_StatusNotFound(t *testing.T) {
 
 	dir := t.TempDir()
 
-	sm.On("GetStatus", mock.Anything).Return(snapshot.StatusNotFound)
+	sm.On("GetInfo", mock.Anything).Return((*snapshot.CodebaseInfo)(nil))
 
 	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
 		"path":  dir,
@@ -2145,9 +2415,9 @@ func TestHandleSearch_StatusNotFound_UsesIndexedAncestorFromSnapshot(t *testing.
 		{RelativePath: "pkg/service/main.go", FileExtension: "go", StartLine: 1, EndLine: 5, Content: "package main"},
 	}
 
-	sm.On("GetStatus", child).Return(snapshot.StatusNotFound)
-	sm.On("GetStatus", filepath.Join(root, "pkg")).Return(snapshot.StatusNotFound)
-	sm.On("GetStatus", root).Return(snapshot.StatusIndexed)
+	sm.On("GetInfo", child).Return((*snapshot.CodebaseInfo)(nil))
+	sm.On("GetInfo", filepath.Join(root, "pkg")).Return((*snapshot.CodebaseInfo)(nil))
+	sm.On("GetInfo", root).Return(&snapshot.CodebaseInfo{Status: snapshot.StatusIndexed})
 	mc.On("HybridSearch", mock.Anything, collection, "test", 20, 60, `relativePath like "pkg/service/%"`).Return(results, nil)
 
 	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
@@ -2175,9 +2445,8 @@ func TestHandleSearch_StatusNotFound_UsesIndexingAncestorFromSnapshotWithEmptySy
 
 	collection := snapshot.CollectionName(root)
 
-	sm.On("GetStatus", child).Return(snapshot.StatusNotFound)
-	sm.On("GetStatus", filepath.Join(root, "pkg")).Return(snapshot.StatusNotFound)
-	sm.On("GetStatus", root).Return(snapshot.StatusIndexing)
+	sm.On("GetInfo", child).Return((*snapshot.CodebaseInfo)(nil))
+	sm.On("GetInfo", filepath.Join(root, "pkg")).Return((*snapshot.CodebaseInfo)(nil))
 	sm.On("GetInfo", root).Return(&snapshot.CodebaseInfo{Step: "Walking files", Status: snapshot.StatusIndexing})
 	mc.On("HybridSearch", mock.Anything, collection, "test", 20, 60, `relativePath like "pkg/service/%"`).Return([]milvus.SearchResult{}, nil)
 
@@ -2205,9 +2474,9 @@ func TestHandleSearch_WithIndexedAncestor_PreservesLiteralPercentAndUnderscoreIn
 		{RelativePath: "pkg/100%_done/main.go", FileExtension: "go", StartLine: 1, EndLine: 3, Content: "package main"},
 	}
 
-	sm.On("GetStatus", child).Return(snapshot.StatusNotFound)
-	sm.On("GetStatus", filepath.Join(root, "pkg")).Return(snapshot.StatusNotFound)
-	sm.On("GetStatus", root).Return(snapshot.StatusIndexed)
+	sm.On("GetInfo", child).Return((*snapshot.CodebaseInfo)(nil))
+	sm.On("GetInfo", filepath.Join(root, "pkg")).Return((*snapshot.CodebaseInfo)(nil))
+	sm.On("GetInfo", root).Return(&snapshot.CodebaseInfo{Status: snapshot.StatusIndexed})
 	// The subtree filter must reach the cf-workers-milvus backend unchanged so it
 	// can apply its literal prefix-range translation for SQL/Vectorize.
 	mc.On("HybridSearch", mock.Anything, collection, "test", 20, 60, `relativePath like "pkg/100%_done/%"`).Return(results, nil)
@@ -2307,8 +2576,11 @@ func TestHandleSearch_StatusFailed(t *testing.T) {
 
 	dir := t.TempDir()
 
-	sm.On("GetStatus", dir).Return(snapshot.StatusFailed).Once()
-	sm.On("GetStatus", mock.MatchedBy(func(path string) bool { return path != dir })).Return(snapshot.StatusNotFound)
+	sm.On("GetInfo", mock.MatchedBy(func(path string) bool { return path != dir })).Return((*snapshot.CodebaseInfo)(nil))
+	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{
+		Status:       snapshot.StatusFailed,
+		ErrorMessage: "Internal server error",
+	})
 
 	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
 		"path":  dir,
@@ -2316,6 +2588,124 @@ func TestHandleSearch_StatusFailed(t *testing.T) {
 	}))
 	require.NoError(t, err)
 	requireErrorResult(t, res, "not indexed")
+	mc.AssertNotCalled(t, "HybridSearch", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+}
+
+func TestHandleSearch_StatusFailedRetryable(t *testing.T) {
+	// A transient (retryable) index failure must not break search: search
+	// proceeds against the existing index with a degraded-results warning.
+	mc := mocks.NewMockVectorClient(t)
+	sm := mocks.NewMockStatusManager(t)
+	sp := mocks.NewMockSplitter(t)
+	h := newTestHandler(t, mc, sm, sp, nil)
+
+	dir := t.TempDir()
+	collection := snapshot.CollectionName(dir)
+
+	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{
+		Status:       snapshot.StatusFailed,
+		ErrorMessage: "AiError: 3040: Capacity temporarily exceeded, please try again.",
+	})
+	mc.On("HybridSearch", mock.Anything, collection, "test", 20, 60, "").Return([]milvus.SearchResult{}, nil)
+
+	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
+		"path":  dir,
+		"query": "test",
+	}))
+	require.NoError(t, err)
+	assert.False(t, res.IsError)
+	assert.Contains(t, resultText(t, res), "The last index update failed after all retry attempts. Results may be incomplete.")
+}
+
+func TestHandleSearch_StatusFailedRetryable_UsesAncestor(t *testing.T) {
+	// A retryable-failed index root still serves searches for child paths.
+	mc := mocks.NewMockVectorClient(t)
+	sm := mocks.NewMockStatusManager(t)
+	sp := mocks.NewMockSplitter(t)
+	h := newTestHandler(t, mc, sm, sp, nil)
+
+	root := t.TempDir()
+	child := filepath.Join(root, "pkg", "service")
+	require.NoError(t, os.MkdirAll(child, 0o755))
+
+	collection := snapshot.CollectionName(root)
+
+	sm.On("GetInfo", child).Return((*snapshot.CodebaseInfo)(nil))
+	sm.On("GetInfo", filepath.Join(root, "pkg")).Return((*snapshot.CodebaseInfo)(nil))
+	sm.On("GetInfo", root).Return(&snapshot.CodebaseInfo{
+		Status:       snapshot.StatusFailed,
+		ErrorMessage: "AiError: 3040: Capacity temporarily exceeded, please try again.",
+	})
+	mc.On("HybridSearch", mock.Anything, collection, "test", 20, 60, `relativePath like "pkg/service/%"`).Return([]milvus.SearchResult{}, nil)
+
+	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
+		"path":  child,
+		"query": "test",
+	}))
+	require.NoError(t, err)
+	assert.False(t, res.IsError)
+	assert.Contains(t, resultText(t, res), "The last index update failed after all retry attempts. Results may be incomplete.")
+}
+
+func TestHandleSearch_StatusFailedRetryable_StaleInfoTransitionKeepsSearchAvailable(t *testing.T) {
+	// A concurrent state transition must not yield a false "not indexed": the
+	// searchability decision for the resolved path comes from one snapshot
+	// read. The info snapshot reports a retryable failure, so search proceeds
+	// even though a later (stale) read would report a permanent failure.
+	mc := mocks.NewMockVectorClient(t)
+	sm := mocks.NewMockStatusManager(t)
+	sp := mocks.NewMockSplitter(t)
+	h := newTestHandler(t, mc, sm, sp, nil)
+
+	dir := t.TempDir()
+	collection := snapshot.CollectionName(dir)
+
+	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{
+		Status:       snapshot.StatusFailed,
+		ErrorMessage: "AiError: 3040: Capacity temporarily exceeded, please try again.",
+	}).Once()
+	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{
+		Status:       snapshot.StatusFailed,
+		ErrorMessage: "Internal server error",
+	}).Maybe()
+	mc.On("HybridSearch", mock.Anything, collection, "test", 20, 60, "").Return([]milvus.SearchResult{}, nil)
+
+	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
+		"path":  dir,
+		"query": "test",
+	}))
+	require.NoError(t, err)
+	assert.False(t, res.IsError)
+	assert.Contains(t, resultText(t, res), "The last index update failed after all retry attempts. Results may be incomplete.")
+}
+
+func TestHandleSearch_SearchabilityDerivedFromSingleInfoSnapshot(t *testing.T) {
+	// A stale GetStatus read may still report Failed while the single info
+	// snapshot already shows Indexing (failure cleared). The decision must rest
+	// on that one snapshot: search proceeds WITHOUT the degraded warning.
+	mc := mocks.NewMockVectorClient(t)
+	sm := mocks.NewMockStatusManager(t)
+	sp := mocks.NewMockSplitter(t)
+	h := newTestHandler(t, mc, sm, sp, nil)
+
+	dir := t.TempDir()
+	collection := snapshot.CollectionName(dir)
+
+	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{
+		Status: snapshot.StatusIndexing,
+		Step:   "Walking files",
+	})
+	mc.On("HybridSearch", mock.Anything, collection, "test", 20, 60, "").Return([]milvus.SearchResult{}, nil)
+
+	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
+		"path":  dir,
+		"query": "test",
+	}))
+	require.NoError(t, err)
+	assert.False(t, res.IsError)
+	text := resultText(t, res)
+	assert.Contains(t, text, "Indexing in progress (Walking files)")
+	assert.NotContains(t, text, "The last index update failed after all retry attempts")
 }
 
 func TestHandleSearch_StatusIndexing_WithStep(t *testing.T) {
@@ -2327,7 +2717,6 @@ func TestHandleSearch_StatusIndexing_WithStep(t *testing.T) {
 	dir := t.TempDir()
 	collection := snapshot.CollectionName(dir)
 
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexing)
 	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{Step: "Walking files", Status: snapshot.StatusIndexing})
 	mc.On("HybridSearch", mock.Anything, collection, "test", 20, 60, "").Return([]milvus.SearchResult{}, nil)
 
@@ -2340,7 +2729,7 @@ func TestHandleSearch_StatusIndexing_WithStep(t *testing.T) {
 	assert.Contains(t, resultText(t, res), "Indexing in progress (Walking files)")
 }
 
-func TestHandleSearch_StatusIndexing_NilInfo(t *testing.T) {
+func TestHandleSearch_StatusIndexing_EmptyStep(t *testing.T) {
 	mc := mocks.NewMockVectorClient(t)
 	sm := mocks.NewMockStatusManager(t)
 	sp := mocks.NewMockSplitter(t)
@@ -2349,8 +2738,7 @@ func TestHandleSearch_StatusIndexing_NilInfo(t *testing.T) {
 	dir := t.TempDir()
 	collection := snapshot.CollectionName(dir)
 
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexing)
-	sm.On("GetInfo", dir).Return((*snapshot.CodebaseInfo)(nil))
+	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{Status: snapshot.StatusIndexing})
 	mc.On("HybridSearch", mock.Anything, collection, "test", 20, 60, "").Return([]milvus.SearchResult{}, nil)
 
 	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
@@ -2373,7 +2761,7 @@ func TestHandleSearch_LimitDefault(t *testing.T) {
 	collection := snapshot.CollectionName(dir)
 	results := makeSearchResults(6)
 
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{Status: snapshot.StatusIndexed})
 	// No "limit" arg → default output 5, backend fetch still uses 20 for rerank headroom.
 	mc.On("HybridSearch", mock.Anything, collection, "test", 20, 60, "").Return(results, nil)
 
@@ -2399,7 +2787,7 @@ func TestHandleSearch_LimitZero(t *testing.T) {
 	dir := t.TempDir()
 	collection := snapshot.CollectionName(dir)
 
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{Status: snapshot.StatusIndexed})
 	// limit=0 → output clamped to 1, backend fetch still uses 20 for rerank headroom.
 	mc.On("HybridSearch", mock.Anything, collection, "test", 20, 60, "").Return([]milvus.SearchResult{}, nil)
 
@@ -2421,7 +2809,7 @@ func TestHandleSearch_LimitOver20(t *testing.T) {
 	dir := t.TempDir()
 	collection := snapshot.CollectionName(dir)
 
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{Status: snapshot.StatusIndexed})
 	// limit=100 → output clamped to 20, backend fetch stays capped at 20.
 	mc.On("HybridSearch", mock.Anything, collection, "test", 20, 60, "").Return([]milvus.SearchResult{}, nil)
 
@@ -2443,7 +2831,7 @@ func TestHandleSearch_SearchError(t *testing.T) {
 	dir := t.TempDir()
 	collection := snapshot.CollectionName(dir)
 
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{Status: snapshot.StatusIndexed})
 	mc.On("HybridSearch", mock.Anything, collection, "test", 20, 60, "").Return(nil, errors.New("search failed"))
 
 	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
@@ -2463,7 +2851,7 @@ func TestHandleSearch_BackendUnavailableError(t *testing.T) {
 	dir := t.TempDir()
 	collection := snapshot.CollectionName(dir)
 
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{Status: snapshot.StatusIndexed})
 	mc.On("HybridSearch", mock.Anything, collection, "test", 20, 60, "").
 		Return(nil, fmt.Errorf("%w: milvus: unexpected non-JSON response: POST /v2/vectordb/entities/hybrid_search: HTTP 404: backend missing", milvus.ErrBackendUnavailable))
 
@@ -2488,7 +2876,7 @@ func TestHandleSearch_MissingSearchStateError(t *testing.T) {
 	dir := t.TempDir()
 	collection := snapshot.CollectionName(dir)
 
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{Status: snapshot.StatusIndexed})
 	mc.On("HybridSearch", mock.Anything, collection, "test", 20, 60, "").
 		Return(nil, fmt.Errorf("%w: milvus: API error: POST /v2/vectordb/entities/hybrid_search: code 1: Error: D1_ERROR: no such table: fts_code_chunks_deadbeef: SQLITE_ERROR", milvus.ErrSearchStateMissing))
 
@@ -2514,7 +2902,7 @@ func TestHandleSearch_NoResults(t *testing.T) {
 	dir := t.TempDir()
 	collection := snapshot.CollectionName(dir)
 
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{Status: snapshot.StatusIndexed})
 	mc.On("HybridSearch", mock.Anything, collection, "test", 20, 60, "").Return([]milvus.SearchResult{}, nil)
 
 	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
@@ -2545,7 +2933,7 @@ func TestHandleSearch_WithResults(t *testing.T) {
 		},
 	}
 
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{Status: snapshot.StatusIndexed})
 	mc.On("HybridSearch", mock.Anything, collection, "main function", 20, 60, "").Return(results, nil)
 
 	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
@@ -2572,7 +2960,7 @@ func TestHandleSearch_MetadataOnlyOmitsContentAndCodeFence(t *testing.T) {
 		{RelativePath: "main.go", StartLine: 1, EndLine: 3, FileExtension: "go", Content: "package main"},
 	}
 
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{Status: snapshot.StatusIndexed})
 	mc.On("HybridSearch", mock.Anything, collection, "main function", 20, 60, "").Return(results, nil)
 
 	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
@@ -2608,7 +2996,7 @@ func TestHandleSearch_TruncatesContentByDefault(t *testing.T) {
 		{RelativePath: "long.go", StartLine: 1, EndLine: 41, FileExtension: "go", Content: content},
 	}
 
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{Status: snapshot.StatusIndexed})
 	mc.On("HybridSearch", mock.Anything, collection, "long", 20, 60, "").Return(results, nil)
 
 	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
@@ -2637,7 +3025,7 @@ func TestHandleSearch_ContentTruncationOptionsCanBeDisabled(t *testing.T) {
 		{RelativePath: "long.go", StartLine: 1, EndLine: 1, FileExtension: "go", Content: content},
 	}
 
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{Status: snapshot.StatusIndexed})
 	mc.On("HybridSearch", mock.Anything, collection, "long", 20, 60, "").Return(results, nil)
 
 	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
@@ -2666,7 +3054,7 @@ func TestHandleSearch_ContentTruncationHonorsExplicitCharCap(t *testing.T) {
 		{RelativePath: "long.go", StartLine: 1, EndLine: 1, FileExtension: "go", Content: "1234567890"},
 	}
 
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{Status: snapshot.StatusIndexed})
 	mc.On("HybridSearch", mock.Anything, collection, "long", 20, 60, "").Return(results, nil)
 
 	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
@@ -2698,7 +3086,7 @@ func TestHandleSearch_MergesAdjacentSameFileHitsBeforeLimit(t *testing.T) {
 		{RelativePath: "other.go", StartLine: 1, EndLine: 2, FileExtension: "go", Content: "other"},
 	}
 
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{Status: snapshot.StatusIndexed})
 	mc.On("HybridSearch", mock.Anything, collection, "test", 20, 60, "").Return(results, nil)
 
 	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
@@ -2773,7 +3161,7 @@ func TestHandleSearch_RequestedLimitTruncatesAfterRerank(t *testing.T) {
 		{RelativePath: "cmd/main.go", FileExtension: "go", StartLine: 1, EndLine: 5, Content: "package main"},
 	}
 
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{Status: snapshot.StatusIndexed})
 	mc.On("HybridSearch", mock.Anything, collection, "test", 20, 60, "").Return(results, nil)
 
 	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
@@ -2802,7 +3190,7 @@ func TestHandleSearch_RequestedLimitOver20UsesBackendCap(t *testing.T) {
 	collection := snapshot.CollectionName(dir)
 	results := makeSearchResults(20)
 
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{Status: snapshot.StatusIndexed})
 	mc.On("HybridSearch", mock.Anything, collection, "test", 20, 60, "").Return(results, nil)
 
 	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
@@ -2833,7 +3221,7 @@ func TestHandleSearch_CODEOWNERSIsDemotedBehindSourceFile(t *testing.T) {
 		{RelativePath: "pkg/service.go", FileExtension: "go", StartLine: 1, EndLine: 5, Content: "package service"},
 	}
 
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{Status: snapshot.StatusIndexed})
 	mc.On("HybridSearch", mock.Anything, collection, "test", 20, 60, "").Return(results, nil)
 
 	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
@@ -2943,7 +3331,7 @@ func TestHandleSearch_WithExtensionFilter(t *testing.T) {
 		{RelativePath: "main.go", FileExtension: "go", StartLine: 1, EndLine: 5, Content: "package main"},
 	}
 
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{Status: snapshot.StatusIndexed})
 	mc.On("HybridSearch", mock.Anything, collection, "test", 20, 60, `fileExtension in ["go"]`).Return(goResults, nil)
 
 	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
@@ -2973,7 +3361,7 @@ func TestHandleSearch_WithMultipleExtensionFilter(t *testing.T) {
 		{RelativePath: "index.ts", FileExtension: "ts", StartLine: 1, EndLine: 3, Content: "const x = 1"},
 	}
 
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{Status: snapshot.StatusIndexed})
 	mc.On("HybridSearch", mock.Anything, collection, "test", 20, 60, `fileExtension in ["go", "ts"]`).Return(results, nil)
 
 	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
@@ -3005,9 +3393,9 @@ func TestHandleSearch_WithIndexedAncestorAndExtensionFilter(t *testing.T) {
 		{RelativePath: "pkg/service/index.ts", FileExtension: "ts", StartLine: 1, EndLine: 3, Content: "const x = 1"},
 	}
 
-	sm.On("GetStatus", child).Return(snapshot.StatusNotFound)
-	sm.On("GetStatus", filepath.Join(root, "pkg")).Return(snapshot.StatusNotFound)
-	sm.On("GetStatus", root).Return(snapshot.StatusIndexed)
+	sm.On("GetInfo", child).Return((*snapshot.CodebaseInfo)(nil))
+	sm.On("GetInfo", filepath.Join(root, "pkg")).Return((*snapshot.CodebaseInfo)(nil))
+	sm.On("GetInfo", root).Return(&snapshot.CodebaseInfo{Status: snapshot.StatusIndexed})
 	mc.On("HybridSearch", mock.Anything, collection, "test", 20, 60,
 		`relativePath like "pkg/service/%" and fileExtension in ["go", "ts"]`,
 	).Return(results, nil)
@@ -3038,7 +3426,7 @@ func TestHandleSearch_WithExtensionFilter_EmptyReturnsAll(t *testing.T) {
 		{RelativePath: "index.ts", FileExtension: "ts", StartLine: 1, EndLine: 5, Content: "const x = 1"},
 	}
 
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{Status: snapshot.StatusIndexed})
 	mc.On("HybridSearch", mock.Anything, collection, "test", 20, 60, "").Return(mixedResults, nil)
 
 	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
@@ -4329,8 +4717,9 @@ func TestBackgroundIndex_SavesPartialOnFailure(t *testing.T) {
 }
 
 // TestIncrementalIndex_SavesPartialOnFailure verifies that on insert failure during
-// incrementalIndex, partial progress is saved: old unchanged files + completed new
-// files are persisted, minus deleted/modified files.
+// incrementalIndex, partial progress is saved: old unchanged files, old entries for
+// modified files, and completed new files are persisted while deleted/incomplete files
+// remain absent so modified files stay retryable.
 func TestIncrementalIndex_SavesPartialOnFailure(t *testing.T) {
 	t.Setenv("INSERT_BATCH_SIZE", "1")
 	t.Setenv("INDEX_CONCURRENCY", "1")
@@ -4348,8 +4737,8 @@ func TestIncrementalIndex_SavesPartialOnFailure(t *testing.T) {
 	require.NoError(t, os.WriteFile(oldFile, []byte("package old\n"), 0o644))
 
 	// "modified.go" exists on disk but has a stale old hash entry, so incrementalIndex
-	// treats it as Modified and must remove the old entry from progressHashes before
-	// any partial save occurs.
+	// treats it as Modified and must retain its old entry in progressHashes until stale
+	// chunks are deleted and the replacement can be committed.
 	modifiedFile := filepath.Join(dir, "modified.go")
 	require.NoError(t, os.WriteFile(modifiedFile, []byte("package modified\n"), 0o644))
 
@@ -4411,8 +4800,8 @@ func TestIncrementalIndex_SavesPartialOnFailure(t *testing.T) {
 
 	waitForDone(t, done, 5*time.Second)
 
-	// Hash file should contain: old.go (unchanged, carried forward) + a.go.
-	// deleted.go and modified.go must be removed from the partial save seed.
+	// Hash file should contain old.go (unchanged), modified.go's old entry for
+	// retry, and completed a.go. Deleted.go and incomplete b.go remain absent.
 	hashFile := filesync.HashFilePath(dir)
 
 	require.Eventually(t, func() bool {
@@ -4428,8 +4817,8 @@ func TestIncrementalIndex_SavesPartialOnFailure(t *testing.T) {
 	assert.Contains(t, loaded.Files, "a.go")
 	assert.NotContains(t, loaded.Files, "b.go")
 	assert.NotContains(t, loaded.Files, "deleted.go")
-	assert.NotContains(t, loaded.Files, "modified.go")
-	assert.Len(t, loaded.Files, 2, "hash file should have old.go + exactly one completed new file")
+	assert.Equal(t, filesync.FileEntry{Hash: "deadbeef", ChunkCount: 7}, loaded.Files["modified.go"])
+	assert.Len(t, loaded.Files, 3, "hash file should retain modified.go for retry")
 }
 
 // TestIncrementalIndex_AfterPartialBackground verifies end-to-end graceful degradation:
@@ -5102,7 +5491,7 @@ func TestHandleSearch_PathFilterOutsideRootFallsBackToNotIndexed(t *testing.T) {
 		return "", fmt.Errorf("%w: forced", errSearchPathOutsideRoot)
 	})
 
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{Status: snapshot.StatusIndexed})
 
 	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
 		"path":  dir,
@@ -5124,7 +5513,7 @@ func TestHandleSearch_PathFilterErrorIsReturned(t *testing.T) {
 		return "", errors.New("broken filter")
 	})
 
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{Status: snapshot.StatusIndexed})
 
 	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
 		"path":  dir,

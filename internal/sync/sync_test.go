@@ -399,6 +399,91 @@ func TestStop_CancelsActiveBackgroundSync(t *testing.T) {
 	}
 }
 
+func TestSyncCodebase_TimeoutDuringFinalizationCleansUp(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.IncrementalSyncTimeout = time.Second
+	mc := mocks.NewMockVectorClient(t)
+	sp := mocks.NewMockSplitter(t)
+	sm := snapshot.NewManager()
+	mgr := NewManager(mc, sm, sp, cfg, 1)
+
+	dir := t.TempDir()
+	goFile := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(goFile, []byte("package main\n"), 0o644))
+	sm.SetIndexed(dir, 1, 1)
+
+	oldHashes := NewFileHashMap()
+	oldHashes.Files["main.go"] = FileEntry{Hash: "stale-hash", ChunkCount: 1}
+	require.NoError(t, oldHashes.Save(HashFilePath(dir)))
+
+	collection := snapshot.CollectionName(dir)
+
+	expectSplitOneChunk(t, sp, "main.go")
+	mc.On("Query", testifymock.Anything, collection, `relativePath == "main.go"`, 1).
+		Return([]milvus.Entity{{ID: "stale-chunk"}}, nil).Once()
+	mc.On("Insert", testifymock.Anything, collection, testifymock.Anything).
+		Return(&milvus.InsertResult{InsertCount: 1}, nil).Once()
+
+	deleteStarted := make(chan struct{})
+	deleteCanceled := make(chan struct{})
+
+	mc.EXPECT().Delete(testifymock.Anything, collection, testifymock.Anything).
+		Run(func(ctx context.Context, _, _ string) {
+			close(deleteStarted)
+			<-ctx.Done()
+			close(deleteCanceled)
+		}).
+		Return(context.DeadlineExceeded)
+
+	done := make(chan struct{})
+
+	go func() {
+		mgr.syncCodebase(dir)
+		close(done)
+	}()
+
+	select {
+	case <-deleteStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("background incremental delete did not start")
+	}
+
+	select {
+	case <-deleteCanceled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("background incremental context was not canceled")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("background incremental sync did not finish after timeout")
+	}
+
+	info := sm.GetInfo(dir)
+	require.NotNil(t, info)
+	assert.Equal(t, snapshot.StatusFailed, info.Status)
+	assert.Contains(t, info.ErrorMessage, "context deadline exceeded")
+
+	mgr.syncMu.Lock()
+	activeCancel := mgr.syncCancel
+	mgr.syncMu.Unlock()
+	assert.Nil(t, activeCancel)
+
+	stopped := make(chan struct{})
+
+	go func() {
+		mgr.Stop()
+		close(stopped)
+	}()
+
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop blocked after timed-out background sync")
+	}
+}
+
 func TestAutoTrackWorkingDirectory_TracksCanonicalizedIndexedPath(t *testing.T) {
 	cfg := testConfig(t)
 	sm := snapshot.NewManager()
@@ -993,9 +1078,13 @@ func TestSyncCodebase_AddedFiles_InsertError_BatchLoop(t *testing.T) {
 	sm.EXPECT().IsIndexing(dir).Return(false)
 	expectSplitOneChunk(t, sp, testifymock.Anything)
 	mc.EXPECT().Insert(testifymock.Anything, collection, testifymock.Anything).
-		Return(nil, errors.New("insert failed"))
-	// Insert failure → SetFailed must be called; SetIndexed and hash save must NOT.
-	sm.EXPECT().SetFailed(dir, "sync: insert failed").Return()
+		Return(nil, errors.New("AiError: 3040: Capacity temporarily exceeded, please try again."))
+	// Insert failure → SetFailed must be called with BOTH the sync prefix and
+	// the original error text preserved; SetIndexed and hash save must NOT.
+	sm.EXPECT().SetFailed(dir, testifymock.MatchedBy(func(s string) bool {
+		return strings.HasPrefix(s, "sync: insert failed:") &&
+			strings.Contains(s, "AiError: 3040: Capacity temporarily exceeded, please try again.")
+	})).Return()
 
 	mgr.syncCodebase(dir)
 
@@ -1025,8 +1114,11 @@ func TestSyncCodebase_AddedFiles_InsertError_Flush(t *testing.T) {
 	expectSplitOneChunk(t, sp, testifymock.Anything)
 	mc.EXPECT().Insert(testifymock.Anything, collection, testifymock.Anything).
 		Return(nil, errors.New("flush failed"))
-	// Insert failure ��� SetFailed must be called; SetIndexed and hash save must NOT.
-	sm.EXPECT().SetFailed(dir, "sync: insert failed").Return()
+	// Insert failure → SetFailed must be called with the original error text
+	// preserved; SetIndexed and hash save must NOT.
+	sm.EXPECT().SetFailed(dir, testifymock.MatchedBy(func(s string) bool {
+		return strings.HasPrefix(s, "sync: insert failed:") && strings.Contains(s, "flush failed")
+	})).Return()
 
 	mgr.syncCodebase(dir)
 
@@ -1259,7 +1351,8 @@ func TestSyncCodebase_WorkerReadError_FailsSync(t *testing.T) {
 	info := sm.GetInfo(dir)
 	require.NotNil(t, info)
 	assert.Equal(t, snapshot.StatusFailed, info.Status)
-	assert.Equal(t, "sync: insert failed", info.ErrorMessage)
+	assert.Contains(t, info.ErrorMessage, "sync: insert failed:")
+	assert.Contains(t, info.ErrorMessage, "permission denied")
 	assert.Equal(t, 5, info.TotalChunks)
 	assert.Contains(t, sm.steps, "Removing stale chunks")
 	assert.Contains(t, sm.steps, "Indexing 1 changed files")

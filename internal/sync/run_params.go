@@ -283,10 +283,11 @@ func (m *Manager) syncRunParamsWithContext(ctx context.Context, path string, tra
 
 		log.Printf("sync: insert failed for %s: %v", path, err)
 
+		msg := "sync: insert failed: " + err
 		if tracker != nil {
-			tracker.Failed("sync: insert failed")
+			tracker.Failed(msg)
 		} else {
-			m.snapshot.SetFailed(path, "sync: insert failed")
+			m.snapshot.SetFailed(path, msg)
 		}
 	}
 	params.OnSaveManifestError = func(err error) {

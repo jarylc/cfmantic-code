@@ -42,13 +42,14 @@ var (
 )
 
 const (
-	notIndexedMessage       = "not indexed, run index_codebase first"
-	searchDefaultLimit      = 5
-	searchBackendLimit      = 20
-	searchBackendRRFK       = 60
-	searchDefaultMaxLines   = 40
-	searchDefaultMaxContent = 2000
-	progressSavePeriod      = time.Second
+	notIndexedMessage            = "not indexed, run index_codebase first"
+	retryableFailedSearchWarning = "The last index update failed after all retry attempts. Results may be incomplete."
+	searchDefaultLimit           = 5
+	searchBackendLimit           = 20
+	searchBackendRRFK            = 60
+	searchDefaultMaxLines        = 40
+	searchDefaultMaxContent      = 2000
+	progressSavePeriod           = time.Second
 )
 
 var auxiliaryBasenames = map[string]struct{}{
@@ -262,35 +263,42 @@ func (h *Handler) HandleSearch(ctx context.Context, req mcp.CallToolRequest) (*m
 		return mcp.NewToolResultError(formatMovedStatusError(err)), nil
 	}
 
-	status := h.snapshot.GetStatus(path)
+	// Decide searchability from ONE CodebaseInfo snapshot per resolved path:
+	// status and error message come from the same read, so a concurrent
+	// transition cannot mix a stale status with fresh info (or vice versa).
+	// When the path itself is not searchable, the ancestor walk returns the
+	// first searchable ancestor along with the snapshot used for that decision.
+	status, info, searchable := h.searchableSnapshot(path)
 
-	if !isSearchableStatus(status) {
-		ancestor, ancestorStatus, ok, ancestorErr := h.nearestSearchableStatusAncestor(path)
+	if !searchable {
+		ancestor, ancestorStatus, ancestorInfo, ok, ancestorErr := h.nearestSearchableStatusAncestor(path)
 		if ancestorErr != nil {
 			return mcp.NewToolResultError(formatMovedStatusError(ancestorErr)), nil
 		}
 
-		if ok {
-			searchRoot = ancestor
-			status = ancestorStatus
+		if !ok {
+			return mcp.NewToolResultError(notIndexedMessage), nil
 		}
-	}
 
-	if !isSearchableStatus(status) {
-		return mcp.NewToolResultError(notIndexedMessage), nil
+		searchRoot = ancestor
+		status = ancestorStatus
+		info = ancestorInfo
 	}
 
 	var preamble string
 
-	if status == snapshot.StatusIndexing {
-		snapInfo := h.snapshot.GetInfo(searchRoot)
-
+	switch status {
+	case snapshot.StatusIndexing:
 		step := ""
-		if snapInfo != nil {
-			step = snapInfo.Step
+		if info != nil {
+			step = info.Step
 		}
 
 		preamble = fmt.Sprintf("Indexing in progress (%s). Results may be incomplete.\n\n", step)
+	case snapshot.StatusFailed:
+		preamble = retryableFailedSearchWarning + "\n\n"
+	case snapshot.StatusIndexed, snapshot.StatusNotFound:
+		// No preamble for these statuses.
 	}
 
 	requestedLimit := min(max(int(req.GetFloat("limit", searchDefaultLimit)), 1), searchBackendLimit)
@@ -357,10 +365,6 @@ func (h *Handler) HandleSearch(ctx context.Context, req mcp.CallToolRequest) (*m
 	}
 
 	return mcp.NewToolResultText(sb.String()), nil
-}
-
-func isSearchableStatus(status snapshot.Status) bool {
-	return status == snapshot.StatusIndexed || status == snapshot.StatusIndexing
 }
 
 func isManagedIndexStatus(status snapshot.Status) bool {
@@ -629,6 +633,28 @@ func (h *Handler) HandleStatus(ctx context.Context, req mcp.CallToolRequest) (*m
 	}
 
 	return mcp.NewToolResultText(msg), nil
+}
+
+// searchableSnapshot evaluates ONE CodebaseInfo snapshot so the status and the
+// error message always come from the same read. Indexed and indexing codebases
+// are searchable; a cleared failure no longer degrades results. A failed
+// codebase is searchable only when the recorded failure is retryable, in which
+// case the existing index may still answer queries. Untracked paths (nil info)
+// are not searchable.
+func (h *Handler) searchableSnapshot(path string) (snapshot.Status, *snapshot.CodebaseInfo, bool) {
+	info := h.snapshot.GetInfo(path)
+	if info == nil {
+		return snapshot.StatusNotFound, nil, false
+	}
+
+	switch info.Status {
+	case snapshot.StatusIndexed, snapshot.StatusIndexing:
+		return info.Status, info, true
+	case snapshot.StatusFailed:
+		return info.Status, info, milvus.IsRetryableAPIErrorMessage(info.ErrorMessage)
+	default:
+		return info.Status, info, false
+	}
 }
 
 func (h *Handler) completedIndexResult(path, successPrefix string) *mcp.CallToolResult {
@@ -941,18 +967,23 @@ func (h *Handler) saveManifest(path string, manifest *filesync.FileHashMap, chun
 	return nil
 }
 
-func (h *Handler) nearestSearchableStatusAncestor(path string) (string, snapshot.Status, bool, error) {
+// nearestSearchableStatusAncestor walks upward from the parent of path and
+// returns the first searchable ancestor. Each candidate is evaluated from one
+// CodebaseInfo snapshot (status and error from the same read), so no path
+// mixes two reads; the returned info is the exact snapshot used for the
+// decision.
+func (h *Handler) nearestSearchableStatusAncestor(path string) (string, snapshot.Status, *snapshot.CodebaseInfo, bool, error) {
 	current := filepath.Dir(path)
 	for current != path {
 		if hasSnapshotState(current) {
 			if err := validateStoredPath(current); err != nil {
-				return "", snapshot.StatusNotFound, false, fmt.Errorf("validate stored path for %q: %w", current, err)
+				return "", snapshot.StatusNotFound, nil, false, fmt.Errorf("validate stored path for %q: %w", current, err)
 			}
 		}
 
-		status := h.snapshot.GetStatus(current)
-		if isSearchableStatus(status) {
-			return current, status, true, nil
+		status, info, searchable := h.searchableSnapshot(current)
+		if searchable {
+			return current, status, info, true, nil
 		}
 
 		next := filepath.Dir(current)
@@ -964,7 +995,7 @@ func (h *Handler) nearestSearchableStatusAncestor(path string) (string, snapshot
 		current = next
 	}
 
-	return "", snapshot.StatusNotFound, false, nil
+	return "", snapshot.StatusNotFound, nil, false, nil
 }
 
 func (h *Handler) nearestManagedAncestor(path string) (string, snapshot.Status, bool) {
@@ -1139,6 +1170,9 @@ func (h *Handler) backgroundIndex(ctx context.Context, path, collection string, 
 
 func (h *Handler) incrementalIndex(ctx context.Context, path string, ignorePatterns []string, tracker *snapshot.Tracker, cleanup func()) {
 	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(ctx, h.cfg.IncrementalSyncTimeout)
+	defer cancel()
 
 	filesync.RunIncremental(h.incrementalRunParams(ctx, path, ignorePatterns, tracker))
 }

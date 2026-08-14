@@ -214,7 +214,7 @@ func (m *Manager) syncCodebase(path string) {
 		return
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.IncrementalSyncTimeout)
 	if !m.startActiveSync(cancel) {
 		cancel()
 

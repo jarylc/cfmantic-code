@@ -49,7 +49,7 @@ func TestHandleSearch_WithFreshSymbolEnrichment(t *testing.T) {
 		Content:       "\treturn 1",
 	}}
 
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{Status: snapshot.StatusIndexed})
 	mc.On("HybridSearch", mock.Anything, collection, "helper", 20, 60, "").Return(results, nil)
 
 	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
@@ -85,7 +85,7 @@ func TestHandleSearch_WithFreshTypeScriptVariableSymbolEnrichment(t *testing.T) 
 		Content:       "export const answer = 42",
 	}}
 
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{Status: snapshot.StatusIndexed})
 	mc.On("HybridSearch", mock.Anything, collection, "answer", 20, 60, "").Return(results, nil)
 
 	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
@@ -121,7 +121,7 @@ func TestHandleSearch_WithFreshTSXExportedFunctionSymbolEnrichment(t *testing.T)
 		Content:       "  return <h1>Hello</h1>;",
 	}}
 
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{Status: snapshot.StatusIndexed})
 	mc.On("HybridSearch", mock.Anything, collection, "Title", 20, 60, "").Return(results, nil)
 
 	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
@@ -164,7 +164,7 @@ func TestHandleSearch_MtimeOnlyChangeKeepsSymbolEnrichment(t *testing.T) {
 		Content:       "\treturn 1",
 	}}
 
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{Status: snapshot.StatusIndexed})
 	mc.On("HybridSearch", mock.Anything, collection, "helper", 20, 60, "").Return(results, nil)
 
 	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
@@ -200,7 +200,7 @@ func TestHandleSearch_StaleFileFallsBackToRawChunk(t *testing.T) {
 		Content:       "\treturn 1",
 	}}
 
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{Status: snapshot.StatusIndexed})
 	mc.On("HybridSearch", mock.Anything, collection, "helper", 20, 60, "").Return(results, nil)
 
 	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
@@ -235,7 +235,7 @@ func TestHandleSearch_WithSupportedFileOutsideSymbolOmitsSymbolAnnotation(t *tes
 		Content:       "package main",
 	}}
 
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{Status: snapshot.StatusIndexed})
 	mc.On("HybridSearch", mock.Anything, collection, "package", 20, 60, "").Return(results, nil)
 
 	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
@@ -270,7 +270,7 @@ func TestHandleSearch_UnsupportedLanguageFallsBackToRawChunk(t *testing.T) {
 		Content:       "plain text",
 	}}
 
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{Status: snapshot.StatusIndexed})
 	mc.On("HybridSearch", mock.Anything, collection, "plain", 20, 60, "").Return(results, nil)
 
 	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
@@ -306,7 +306,7 @@ func TestHandleSearch_MalformedSupportedFileFallsBackToRawChunk(t *testing.T) {
 		Content:       "package main\n\nfunc (",
 	}}
 
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	sm.On("GetInfo", dir).Return(&snapshot.CodebaseInfo{Status: snapshot.StatusIndexed})
 	mc.On("HybridSearch", mock.Anything, collection, "broken", 20, 60, "").Return(results, nil)
 
 	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{

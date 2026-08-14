@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Sentinel errors for config validation.
@@ -22,6 +23,7 @@ var (
 	ErrInvalidSearchMinRerankScore    = errors.New("SEARCH_MIN_RERANK_SCORE must be a finite number between 0 and 1")
 	ErrSearchMinRerankScoreRequiresAI = errors.New("SEARCH_MIN_RERANK_SCORE requires RERANK_STRATEGY=workers_ai")
 	ErrSyncIntervalNegative           = errors.New("SYNC_INTERVAL must be >= 0 (0 = disabled)")
+	ErrInvalidIncrementalSyncTimeout  = errors.New("INCREMENTAL_SYNC_TIMEOUT_SECONDS must be a positive integer")
 	ErrInvalidIndexConcurrency        = errors.New("INDEX_CONCURRENCY must be a positive integer")
 	ErrInvalidInsertBatchSize         = errors.New("INSERT_BATCH_SIZE must be a positive integer")
 	ErrInvalidInsertConcurrency       = errors.New("INSERT_CONCURRENCY must be a positive integer")
@@ -30,26 +32,29 @@ var (
 
 const defaultRerankStrategy = "workers_ai"
 
+const defaultIncrementalSyncTimeoutSeconds = 600
+
 var buildVersion = "0.1.0"
 
 // Config holds all runtime configuration for the MCP server.
 type Config struct {
-	WorkerURL            string
-	AuthToken            string
-	EmbeddingDimension   int
-	ChunkSize            int
-	ChunkOverlap         int
-	CustomIgnore         []string
-	ServerName           string
-	ServerVersion        string
-	SplitterType         string   // SPLITTER_TYPE env var: "ast" (default) or "text"
-	RerankStrategy       string   // RERANK_STRATEGY env var: Milvus hybrid rerank strategy ("workers_ai" or "rrf", default workers_ai)
-	SearchMinRerankScore *float64 // SEARCH_MIN_RERANK_SCORE env var: optional inclusive Workers AI score threshold [0,1]
-	SyncInterval         int      // SYNC_INTERVAL env var: seconds between sync cycles (default 60)
-	IndexConcurrency     int      // INDEX_CONCURRENCY env var: parallel workers for indexing (default: NumCPU)
-	InsertBatchSize      int      // INSERT_BATCH_SIZE env var: entities per insert request (default 192)
-	InsertConcurrency    int      // INSERT_CONCURRENCY env var: concurrent HTTP insert calls to worker (default 2)
-	DesktopNotifications bool     // DESKTOP_NOTIFICATIONS env var: enable best-effort OS notifications (default false)
+	WorkerURL              string
+	AuthToken              string
+	EmbeddingDimension     int
+	ChunkSize              int
+	ChunkOverlap           int
+	CustomIgnore           []string
+	ServerName             string
+	ServerVersion          string
+	SplitterType           string        // SPLITTER_TYPE env var: "ast" (default) or "text"
+	RerankStrategy         string        // RERANK_STRATEGY env var: Milvus hybrid rerank strategy ("workers_ai" or "rrf", default workers_ai)
+	SearchMinRerankScore   *float64      // SEARCH_MIN_RERANK_SCORE env var: optional inclusive Workers AI score threshold [0,1]
+	SyncInterval           int           // SYNC_INTERVAL env var: seconds between sync cycles (default 60)
+	IncrementalSyncTimeout time.Duration // INCREMENTAL_SYNC_TIMEOUT_SECONDS env var: maximum duration for one incremental sync (default 600 seconds)
+	IndexConcurrency       int           // INDEX_CONCURRENCY env var: parallel workers for indexing (default: NumCPU)
+	InsertBatchSize        int           // INSERT_BATCH_SIZE env var: entities per insert request (default 192)
+	InsertConcurrency      int           // INSERT_CONCURRENCY env var: concurrent HTTP insert calls to worker (default 2)
+	DesktopNotifications   bool          // DESKTOP_NOTIFICATIONS env var: enable best-effort OS notifications (default false)
 }
 
 func defaultIndexConcurrency(cpuCount int) int {
@@ -178,6 +183,17 @@ func Load() (*Config, error) {
 		syncInterval = n
 	}
 
+	incrementalSyncTimeoutSeconds := defaultIncrementalSyncTimeoutSeconds
+
+	if v := os.Getenv("INCREMENTAL_SYNC_TIMEOUT_SECONDS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || int64(n) > math.MaxInt64/int64(time.Second) {
+			return nil, fmt.Errorf("%w: %s", ErrInvalidIncrementalSyncTimeout, v)
+		}
+
+		incrementalSyncTimeoutSeconds = n
+	}
+
 	indexConcurrency := defaultIndexConcurrency(runtime.NumCPU())
 
 	if v := os.Getenv("INDEX_CONCURRENCY"); v != "" {
@@ -223,21 +239,22 @@ func Load() (*Config, error) {
 	}
 
 	return &Config{
-		WorkerURL:            workerURL,
-		AuthToken:            authToken,
-		EmbeddingDimension:   embeddingDimension,
-		ChunkSize:            chunkSize,
-		ChunkOverlap:         chunkOverlap,
-		CustomIgnore:         splitCSV("CUSTOM_IGNORE_PATTERNS"),
-		ServerName:           serverName,
-		ServerVersion:        serverVersion,
-		SplitterType:         splitterType,
-		RerankStrategy:       rerankStrategy,
-		SearchMinRerankScore: searchMinRerankScore,
-		SyncInterval:         syncInterval,
-		IndexConcurrency:     indexConcurrency,
-		InsertBatchSize:      insertBatchSize,
-		InsertConcurrency:    insertConcurrency,
-		DesktopNotifications: desktopNotifications,
+		WorkerURL:              workerURL,
+		AuthToken:              authToken,
+		EmbeddingDimension:     embeddingDimension,
+		ChunkSize:              chunkSize,
+		ChunkOverlap:           chunkOverlap,
+		CustomIgnore:           splitCSV("CUSTOM_IGNORE_PATTERNS"),
+		ServerName:             serverName,
+		ServerVersion:          serverVersion,
+		SplitterType:           splitterType,
+		RerankStrategy:         rerankStrategy,
+		SearchMinRerankScore:   searchMinRerankScore,
+		SyncInterval:           syncInterval,
+		IncrementalSyncTimeout: time.Duration(incrementalSyncTimeoutSeconds) * time.Second,
+		IndexConcurrency:       indexConcurrency,
+		InsertBatchSize:        insertBatchSize,
+		InsertConcurrency:      insertConcurrency,
+		DesktopNotifications:   desktopNotifications,
 	}, nil
 }

@@ -208,7 +208,15 @@ func RunIncremental(params *IncrementalParams) {
 				progressSaver = params.NewProgressSaver(manifestDiff.ProgressManifest())
 			}
 
-			result := params.ProcessFiles(filesToProcess, progressRecorder(progressSaver, manifestDiff.Manifest, params.OnProgressSaveError))
+			modifiedPaths := make(map[string]struct{})
+
+			for _, change := range manifestDiff.Changes {
+				if change.Type == Modified {
+					modifiedPaths[change.RelPath] = struct{}{}
+				}
+			}
+
+			result := params.ProcessFiles(filesToProcess, progressRecorderSkipping(progressSaver, manifestDiff.Manifest, modifiedPaths, params.OnProgressSaveError))
 			if result.Err == "" {
 				call(params.OnFinalizeStart)
 			}
@@ -416,11 +424,19 @@ func flushProgressSaver(saver ProgressSaver, onError func(error)) {
 }
 
 func progressRecorder(saver ProgressSaver, manifest *FileHashMap, onError func(error)) func(string, int) {
+	return progressRecorderSkipping(saver, manifest, nil, onError)
+}
+
+func progressRecorderSkipping(saver ProgressSaver, manifest *FileHashMap, skipPaths map[string]struct{}, onError func(error)) func(string, int) {
 	if saver == nil || manifest == nil {
 		return nil
 	}
 
 	return func(relPath string, chunkCount int) {
+		if _, skip := skipPaths[relPath]; skip {
+			return
+		}
+
 		entry, ok := manifest.Files[relPath]
 		if !ok {
 			return

@@ -637,6 +637,7 @@ func TestRunIncremental_CallsFinalizeStartBeforeCleanupAndSave(t *testing.T) {
 	})
 
 	assert.Equal(t, []string{"process", "finalize", "flush", "delete:chunk-stale", "save", "indexed", "after"}, order)
+	assert.NotContains(t, saver.records, "main.go", "modified files must remain retryable until stale chunks are deleted")
 }
 
 func TestRunFull_WalkErrorStopsBeforeProcessing(t *testing.T) {
@@ -825,7 +826,7 @@ func TestRunIncremental_DeleteChunkErrorStopsBeforeSave(t *testing.T) {
 	})
 
 	require.EqualError(t, handledErr, "delete boom")
-	require.Contains(t, saver.records, "main.go")
+	assert.NotContains(t, saver.records, "main.go", "modified files must remain retryable until stale chunks are deleted")
 }
 
 func TestRunHelpers_HandleEdgeCases(t *testing.T) {

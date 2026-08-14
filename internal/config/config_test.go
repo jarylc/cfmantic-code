@@ -1,9 +1,12 @@
 package config
 
 import (
+	"math"
 	"reflect"
 	"runtime"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -22,6 +25,7 @@ var allConfigEnvVars = []string{
 	"CUSTOM_IGNORE_PATTERNS",
 	"SPLITTER_TYPE",
 	"SYNC_INTERVAL",
+	"INCREMENTAL_SYNC_TIMEOUT_SECONDS",
 	"INDEX_CONCURRENCY",
 	"INSERT_BATCH_SIZE",
 	"INSERT_CONCURRENCY",
@@ -76,6 +80,7 @@ func TestLoad_HappyPath(t *testing.T) {
 	t.Setenv("CUSTOM_IGNORE_PATTERNS", "*.tmp,*.log")
 	t.Setenv("SPLITTER_TYPE", "text")
 	t.Setenv("SYNC_INTERVAL", "600")
+	t.Setenv("INCREMENTAL_SYNC_TIMEOUT_SECONDS", "900")
 	t.Setenv("INDEX_CONCURRENCY", "4")
 	t.Setenv("INSERT_BATCH_SIZE", "192")
 	t.Setenv("INSERT_CONCURRENCY", "3")
@@ -97,6 +102,7 @@ func TestLoad_HappyPath(t *testing.T) {
 	assert.Equal(t, "2.3.4", cfg.ServerVersion)
 	assert.Equal(t, "text", cfg.SplitterType)
 	assert.Equal(t, 600, cfg.SyncInterval)
+	assert.Equal(t, 900*time.Second, cfg.IncrementalSyncTimeout)
 	assert.Equal(t, 4, cfg.IndexConcurrency)
 	assert.Equal(t, 192, cfg.InsertBatchSize)
 	assert.Equal(t, 3, cfg.InsertConcurrency)
@@ -163,6 +169,7 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, "2.3.4", cfg.ServerVersion, "server version comes from buildVersion")
 	assert.Equal(t, "ast", cfg.SplitterType, "default SPLITTER_TYPE")
 	assert.Equal(t, 60, cfg.SyncInterval, "default SYNC_INTERVAL")
+	assert.Equal(t, 10*time.Minute, cfg.IncrementalSyncTimeout, "default INCREMENTAL_SYNC_TIMEOUT_SECONDS")
 	assert.Equal(t, wantIndexConcurrency, cfg.IndexConcurrency, "default INDEX_CONCURRENCY")
 	assert.Equal(t, 192, cfg.InsertBatchSize, "default INSERT_BATCH_SIZE")
 	assert.Equal(t, 4, cfg.InsertConcurrency, "default INSERT_CONCURRENCY")
@@ -296,6 +303,7 @@ func TestLoad_InvalidIntegers(t *testing.T) {
 		{"CHUNK_SIZE", "CHUNK_SIZE must be an integer"},
 		{"CHUNK_OVERLAP", "CHUNK_OVERLAP must be an integer"},
 		{"SYNC_INTERVAL", "SYNC_INTERVAL must be an integer"},
+		{"INCREMENTAL_SYNC_TIMEOUT_SECONDS", "INCREMENTAL_SYNC_TIMEOUT_SECONDS must be a positive integer"},
 		{"INDEX_CONCURRENCY", "INDEX_CONCURRENCY must be a positive integer"},
 		{"INSERT_BATCH_SIZE", "INSERT_BATCH_SIZE must be a positive integer"},
 		{"INSERT_CONCURRENCY", "INSERT_CONCURRENCY must be a positive integer"},
@@ -482,6 +490,32 @@ func TestLoad_SyncIntervalValidation(t *testing.T) {
 		assert.Nil(t, cfg)
 		assert.Contains(t, err.Error(), "SYNC_INTERVAL must be >= 0")
 	})
+}
+
+// TestLoad_IncrementalSyncTimeoutValidation verifies that the operation
+// timeout must be a strictly positive number of seconds.
+func TestLoad_IncrementalSyncTimeoutValidation(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+	}{
+		{name: "zero", value: "0"},
+		{name: "negative", value: "-1"},
+		{name: "duration overflow", value: strconv.FormatInt(math.MaxInt64/int64(time.Second)+1, 10)},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			setRequired(t)
+			t.Setenv("INCREMENTAL_SYNC_TIMEOUT_SECONDS", tc.value)
+
+			cfg, err := Load()
+			require.Error(t, err)
+			assert.Nil(t, cfg)
+			assert.Contains(t, err.Error(), "INCREMENTAL_SYNC_TIMEOUT_SECONDS must be a positive integer")
+		})
+	}
 }
 
 // TestLoad_SplitterType checks all accepted values and rejects unknown ones.

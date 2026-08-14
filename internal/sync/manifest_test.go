@@ -550,6 +550,29 @@ func TestManifestDiff_HelperViews(t *testing.T) {
 	assert.Equal(t, 1, deleted)
 }
 
+func TestManifestDiff_ProgressManifestRetainsOldModifiedEntries(t *testing.T) {
+	diff := &ManifestDiff{
+		Manifest: &FileHashMap{Files: map[string]FileEntry{
+			"added.go":     {Hash: "new-added", ChunkCount: 1},
+			"modified.go":  {Hash: "new-modified", ChunkCount: 4},
+			"unchanged.go": {Hash: "same", ChunkCount: 3},
+		}},
+		OldManifest: &FileHashMap{Files: map[string]FileEntry{
+			"modified.go": {Hash: "old-modified", ChunkCount: 2},
+		}},
+		Changes: []FileChange{
+			{RelPath: "added.go", Type: Added},
+			{RelPath: "modified.go", Type: Modified},
+		},
+	}
+
+	progress := diff.ProgressManifest()
+
+	assert.NotContains(t, progress.Files, "added.go")
+	assert.Equal(t, FileEntry{Hash: "old-modified", ChunkCount: 2}, progress.Files["modified.go"])
+	assert.Equal(t, FileEntry{Hash: "same", ChunkCount: 3}, progress.Files["unchanged.go"])
+}
+
 func TestSaveManifest_NilManifestPersistsEmptyMap(t *testing.T) {
 	path := t.TempDir()
 
