@@ -1482,6 +1482,7 @@ func TestHandleIndex_IncrementalIndex_TimeoutDuringFinalizationCleansUp(t *testi
 	sm := mocks.NewMockStatusManager(t)
 	h := newTestHandler(t, mc, sm, sp, nil)
 	h.cfg.IncrementalSyncTimeout = time.Second
+	h.cfg.IncrementalDeleteTimeout = time.Second
 
 	dir := t.TempDir()
 	collection := snapshot.CollectionName(dir)
@@ -1562,6 +1563,7 @@ func TestHandleIndex_IncrementalIndex_TimeoutPreservesManifestForRetry(t *testin
 	sm := snapshot.NewManager()
 	cfg := loadTestConfig(t)
 	cfg.IncrementalSyncTimeout = time.Second
+	cfg.IncrementalDeleteTimeout = time.Second
 	h := New(mc, sm, cfg, sp, nil)
 
 	dir := t.TempDir()
@@ -1655,6 +1657,7 @@ func TestHandleIndex_IncrementalIndex_MixedTimeoutRetriesStaleChunks(t *testing.
 	sm := snapshot.NewManager()
 	cfg := loadTestConfig(t)
 	cfg.IncrementalSyncTimeout = time.Second
+	cfg.IncrementalDeleteTimeout = time.Second
 	h := New(mc, sm, cfg, sp, nil)
 
 	dir := t.TempDir()
@@ -1742,6 +1745,80 @@ func TestHandleIndex_IncrementalIndex_MixedTimeoutRetriesStaleChunks(t *testing.
 	assert.NotEqual(t, "stale-hash", entry.Hash)
 	assert.Equal(t, 1, entry.ChunkCount)
 	assert.Contains(t, manifest.Files, "added.go")
+}
+
+func TestHandleIndex_IncrementalIndex_InsertConsumesRunDeadlineStillDeletesAndIndexes(t *testing.T) {
+	allowTempDirIndexing(t)
+
+	mc := mocks.NewMockVectorClient(t)
+	sp := mocks.NewMockSplitter(t)
+	sm := mocks.NewMockStatusManager(t)
+	h := newTestHandler(t, mc, sm, sp, nil)
+	h.cfg.IncrementalSyncTimeout = time.Second
+	h.cfg.IncrementalDeleteTimeout = 5 * time.Second
+
+	dir := t.TempDir()
+	collection := snapshot.CollectionName(dir)
+	goFile := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(goFile, []byte("package main\n"), 0o644))
+
+	oldHashes := filesync.NewFileHashMap()
+	oldHashes.Files["main.go"] = filesync.FileEntry{Hash: "stale-hash", ChunkCount: 1}
+	require.NoError(t, oldHashes.Save(filesync.HashFilePath(dir)))
+
+	sm.On("IsIndexing", dir).Return(false)
+	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+	expectRemoteCollectionExists(mc, dir)
+	sm.On("SetStep", dir, "Starting incremental sync").Return()
+	sm.On("SetStep", dir, "Walking files").Return()
+	sm.On("SetStep", dir, "Computing file changes").Return()
+	sm.On("SetStep", dir, "Removing stale chunks").Return()
+	sm.On("SetStep", dir, "Indexing 1 changed files").Return()
+	sm.On("SetStep", dir, "Finalizing incremental sync").Return()
+	sm.On("SetProgress", mock.Anything, mock.Anything).Maybe()
+	sm.On("GetInfo", dir).Return((*snapshot.CodebaseInfo)(nil)).Maybe()
+
+	expectSplitChunks(t, sp, "main.go", []splitter.Chunk{{Content: "package main", StartLine: 1, EndLine: 1}})
+	mc.On("Query", mock.Anything, collection, `relativePath == "main.go"`, 1).
+		Return([]milvus.Entity{{ID: "stale-chunk"}}, nil).Once()
+
+	// The insert consumes the whole run deadline and still reports success,
+	// so the sync only finishes after the run context is already dead.
+	mc.On("Insert", mock.Anything, collection, singleFileInsert("main.go")).
+		Run(func(args mock.Arguments) {
+			insertCtx, ok := args.Get(0).(context.Context)
+			assert.True(t, ok)
+			<-insertCtx.Done()
+		}).
+		Return(&milvus.InsertResult{InsertCount: 1}, nil).Once()
+
+	// The delete must still receive a live context with its own budget.
+	mc.On("Delete", mock.Anything, collection, mock.Anything).
+		Run(func(args mock.Arguments) {
+			deleteCtx, ok := args.Get(0).(context.Context)
+			assert.True(t, ok)
+			require.NoError(t, deleteCtx.Err(), "delete must receive a live context after the insert consumed the run deadline")
+			_, hasDeadline := deleteCtx.Deadline()
+			assert.True(t, hasDeadline, "delete context must carry the delete timeout budget")
+		}).
+		Return(nil).Once()
+
+	sm.On("SetIndexed", dir, 1, 1).Return().Once()
+
+	res, err := h.HandleIndex(context.Background(), makeReq(map[string]any{
+		"path":  dir,
+		"async": false,
+	}))
+	require.NoError(t, err)
+	assert.False(t, res.IsError)
+	assert.Contains(t, resultText(t, res), "Incremental sync complete")
+
+	manifest, err := filesync.LoadFileHashMap(filesync.HashFilePath(dir))
+	require.NoError(t, err)
+
+	entry, ok := manifest.Files["main.go"]
+	require.True(t, ok)
+	assert.NotEqual(t, "stale-hash", entry.Hash)
 }
 
 func TestHandleIndex_AlreadyIndexed_NoReindex_ExplicitSyncReturnsErrorOnFailure(t *testing.T) {

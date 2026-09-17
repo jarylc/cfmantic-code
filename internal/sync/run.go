@@ -4,8 +4,16 @@ import (
 	"cfmantic-code/internal/runtimeutil"
 	"cfmantic-code/internal/snapshot"
 	"cfmantic-code/internal/walker"
+	"context"
 	"errors"
 )
+
+// isContextDone reports whether err wraps a deadline or cancellation, meaning
+// the delete loops must stop immediately instead of piling up one wrapped
+// error per remaining batch.
+func isContextDone(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
+}
 
 var (
 	acquireLock = snapshot.AcquireLock
@@ -321,6 +329,10 @@ func deleteDeletedFiles(diff *ManifestDiff, deleteFile func(string) error) error
 
 		if err := deleteFile(change.RelPath); err != nil {
 			deleteErr = errors.Join(deleteErr, err)
+
+			if isContextDone(err) {
+				return deleteErr
+			}
 		}
 	}
 
@@ -371,6 +383,10 @@ func deleteModifiedFileChunks(
 
 				if err := deleteChunkIDs(staleIDs[:batchSize]); err != nil {
 					deleteErr = errors.Join(deleteErr, err)
+
+					if isContextDone(err) {
+						return deleteErr
+					}
 				}
 
 				staleIDs = staleIDs[batchSize:]
@@ -382,6 +398,10 @@ func deleteModifiedFileChunks(
 		for _, id := range staleIDs {
 			if err := deleteChunkID(id); err != nil {
 				deleteErr = errors.Join(deleteErr, err)
+
+				if isContextDone(err) {
+					return deleteErr
+				}
 			}
 		}
 	}

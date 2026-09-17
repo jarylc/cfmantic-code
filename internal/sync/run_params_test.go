@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -192,7 +193,7 @@ func TestSyncRunParamsWithContext_UsesProvidedContext(t *testing.T) {
 	file := writeRunCodeFile(t, path, "main.go")
 	collection := snapshot.CollectionName(path)
 	ctx := context.WithValue(context.Background(), ctxKey{}, "background-sync")
-	params := mgr.syncRunParamsWithContext(ctx, path, nil)
+	params := mgr.syncRunParamsWithContext(ctx, nil, path, nil)
 
 	matchCtx := mock.MatchedBy(func(actual context.Context) bool {
 		return actual.Value(ctxKey{}) == "background-sync"
@@ -237,7 +238,7 @@ func TestSyncRunParamsWithContext_WalkFilesUsesProvidedContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	params := mgr.syncRunParamsWithContext(ctx, path, nil)
+	params := mgr.syncRunParamsWithContext(ctx, nil, path, nil)
 
 	files, err := params.WalkFiles()
 	require.Error(t, err)
@@ -309,7 +310,7 @@ func TestSyncRunParams_TrackerFailureCallbacks(t *testing.T) {
 		mgr := NewManager(mocks.NewMockVectorClient(t), status, mocks.NewMockSplitter(t), cfg, 300)
 		path := t.TempDir()
 
-		params := mgr.syncRunParamsWithContext(context.Background(), path, snapshot.NewTracker(status, path, meta))
+		params := mgr.syncRunParamsWithContext(context.Background(), nil, path, snapshot.NewTracker(status, path, meta))
 		params.OnWalkError(errors.New("walk boom"))
 
 		info := status.GetInfo(path)
@@ -325,7 +326,7 @@ func TestSyncRunParams_TrackerFailureCallbacks(t *testing.T) {
 		mgr := NewManager(mocks.NewMockVectorClient(t), status, mocks.NewMockSplitter(t), cfg, 300)
 		path := t.TempDir()
 
-		params := mgr.syncRunParamsWithContext(context.Background(), path, snapshot.NewTracker(status, path, meta))
+		params := mgr.syncRunParamsWithContext(context.Background(), nil, path, snapshot.NewTracker(status, path, meta))
 		params.OnDeleteError(errors.New("delete boom"))
 
 		info := status.GetInfo(path)
@@ -340,7 +341,7 @@ func TestSyncRunParams_TrackerFailureCallbacks(t *testing.T) {
 		mgr := NewManager(mocks.NewMockVectorClient(t), status, mocks.NewMockSplitter(t), cfg, 300)
 		path := t.TempDir()
 
-		params := mgr.syncRunParamsWithContext(context.Background(), path, snapshot.NewTracker(status, path, meta))
+		params := mgr.syncRunParamsWithContext(context.Background(), nil, path, snapshot.NewTracker(status, path, meta))
 		params.OnSaveManifestError(errors.New("save boom"))
 
 		info := status.GetInfo(path)
@@ -358,8 +359,71 @@ func TestSyncRunParams_CanceledDeleteErrorDoesNotFailStatus(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	params := mgr.syncRunParamsWithContext(ctx, path, nil)
+	params := mgr.syncRunParamsWithContext(ctx, nil, path, nil)
 	params.OnDeleteError(errors.New("delete boom"))
 
 	assert.Nil(t, status.GetInfo(path))
+}
+
+func TestSyncRunParams_DeleteContextSurvivesExpiredRunContext(t *testing.T) {
+	mc := mocks.NewMockVectorClient(t)
+	path := t.TempDir()
+	collection := snapshot.CollectionName(path)
+
+	// The cancel-only parent mirrors the handler and auto-sync wiring; the
+	// separate delete budget must keep delete requests alive after the run
+	// context dies.
+	deleteParent := t.Context()
+
+	runCtx, runCancel := context.WithCancel(context.Background())
+	runCancel()
+
+	params := NewIncrementalParams(runCtx, &IncrementalParamsConfig{
+		Path:                path,
+		Collection:          collection,
+		Client:              mc,
+		LogPrefix:           "sync",
+		IncludePathInErrors: true,
+		DeleteParentContext: deleteParent,
+		DeleteTimeout:       time.Minute,
+	})
+
+	assertDeleteContextHealthy := func(args mock.Arguments) {
+		deleteCtx, ok := args.Get(0).(context.Context)
+		require.True(t, ok)
+		require.NoError(t, deleteCtx.Err(), "delete must use its own live context after the run context expires")
+		_, hasDeadline := deleteCtx.Deadline()
+		assert.True(t, hasDeadline, "delete context must carry the delete timeout budget")
+	}
+
+	mc.On("Delete", mock.Anything, collection, `relativePath == "main.go"`).
+		Run(assertDeleteContextHealthy).Return(nil).Once()
+	mc.On("Delete", mock.Anything, collection, `id in ["chunk-stale-a","chunk-stale-b"]`).
+		Run(assertDeleteContextHealthy).Return(nil).Once()
+	mc.On("Delete", mock.Anything, collection, `id in ["chunk-stale-c"]`).
+		Run(assertDeleteContextHealthy).Return(nil).Once()
+
+	require.NoError(t, params.DeleteFile("main.go"))
+	require.NoError(t, params.DeleteChunkIDs([]string{"chunk-stale-a", "chunk-stale-b"}))
+	require.NoError(t, params.DeleteChunkID("chunk-stale-c"))
+}
+
+func TestSyncRunParams_ZeroValueDeleteConfigUsesRunContext(t *testing.T) {
+	mc := mocks.NewMockVectorClient(t)
+	path := t.TempDir()
+	collection := snapshot.CollectionName(path)
+
+	runCtx := t.Context()
+
+	params := NewIncrementalParams(runCtx, &IncrementalParamsConfig{
+		Path:       path,
+		Collection: collection,
+		Client:     mc,
+	})
+
+	matchRunCtx := mock.MatchedBy(func(actual context.Context) bool { return actual == runCtx })
+
+	mc.On("Delete", matchRunCtx, collection, `id in ["chunk-stale"]`).Return(nil).Once()
+
+	require.NoError(t, params.DeleteChunkID("chunk-stale"))
 }

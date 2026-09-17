@@ -367,6 +367,35 @@ func TestDo_ContextCancelled_RetryableAPIError(t *testing.T) {
 	assert.Less(t, elapsed, 500*time.Millisecond, "backoff should have been interrupted by context cancellation")
 }
 
+func TestDo_DeadlineExceededBeforeRequest(t *testing.T) {
+	// An already-expired context must fail fast before any transport attempt
+	// and report the context error directly instead of the misleading
+	// "retry backoff interrupted" that used to mask it.
+	var transportCalls atomic.Int32
+
+	c := NewClient("http://example.com", "token")
+	c.httpClient = &http.Client{
+		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			transportCalls.Add(1)
+
+			return nil, errors.New("transport must not be called with an expired context")
+		}),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), -time.Nanosecond)
+	defer cancel()
+
+	start := time.Now()
+
+	err := c.do(ctx, "/test", map[string]string{}, nil)
+	elapsed := time.Since(start)
+
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Equal(t, "milvus: POST /test: context deadline exceeded", err.Error())
+	assert.Equal(t, int32(0), transportCalls.Load(), "an expired context must fail before any transport attempt")
+	assert.Less(t, elapsed, 500*time.Millisecond, "an expired context must fail fast without request or backoff")
+}
+
 func TestDo_Retry429(t *testing.T) {
 	var callCount atomic.Int32
 

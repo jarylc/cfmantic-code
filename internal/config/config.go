@@ -13,48 +13,52 @@ import (
 
 // Sentinel errors for config validation.
 var (
-	ErrWorkerURLRequired              = errors.New("WORKER_URL is required")
-	ErrAuthTokenRequired              = errors.New("AUTH_TOKEN is required")
-	ErrInvalidSplitterType            = errors.New("SPLITTER_TYPE must be \"ast\" or \"text\"")
-	ErrInvalidEmbeddingDim            = errors.New("EMBEDDING_DIMENSION must be a positive integer")
-	ErrInvalidChunkSize               = errors.New("CHUNK_SIZE must be a positive integer")
-	ErrInvalidChunkOverlap            = errors.New("CHUNK_OVERLAP must be >= 0 and less than CHUNK_SIZE")
-	ErrInvalidRerankStrategy          = errors.New("RERANK_STRATEGY must be one of \"workers_ai\" or \"rrf\"")
-	ErrInvalidSearchMinRerankScore    = errors.New("SEARCH_MIN_RERANK_SCORE must be a finite number between 0 and 1")
-	ErrSearchMinRerankScoreRequiresAI = errors.New("SEARCH_MIN_RERANK_SCORE requires RERANK_STRATEGY=workers_ai")
-	ErrSyncIntervalNegative           = errors.New("SYNC_INTERVAL must be >= 0 (0 = disabled)")
-	ErrInvalidIncrementalSyncTimeout  = errors.New("INCREMENTAL_SYNC_TIMEOUT_SECONDS must be a positive integer")
-	ErrInvalidIndexConcurrency        = errors.New("INDEX_CONCURRENCY must be a positive integer")
-	ErrInvalidInsertBatchSize         = errors.New("INSERT_BATCH_SIZE must be a positive integer")
-	ErrInvalidInsertConcurrency       = errors.New("INSERT_CONCURRENCY must be a positive integer")
-	ErrInvalidDesktopNotify           = errors.New("DESKTOP_NOTIFICATIONS must be a boolean")
+	ErrWorkerURLRequired               = errors.New("WORKER_URL is required")
+	ErrAuthTokenRequired               = errors.New("AUTH_TOKEN is required")
+	ErrInvalidSplitterType             = errors.New("SPLITTER_TYPE must be \"ast\" or \"text\"")
+	ErrInvalidEmbeddingDim             = errors.New("EMBEDDING_DIMENSION must be a positive integer")
+	ErrInvalidChunkSize                = errors.New("CHUNK_SIZE must be a positive integer")
+	ErrInvalidChunkOverlap             = errors.New("CHUNK_OVERLAP must be >= 0 and less than CHUNK_SIZE")
+	ErrInvalidRerankStrategy           = errors.New("RERANK_STRATEGY must be one of \"workers_ai\" or \"rrf\"")
+	ErrInvalidSearchMinRerankScore     = errors.New("SEARCH_MIN_RERANK_SCORE must be a finite number between 0 and 1")
+	ErrSearchMinRerankScoreRequiresAI  = errors.New("SEARCH_MIN_RERANK_SCORE requires RERANK_STRATEGY=workers_ai")
+	ErrSyncIntervalNegative            = errors.New("SYNC_INTERVAL must be >= 0 (0 = disabled)")
+	ErrInvalidIncrementalSyncTimeout   = errors.New("INCREMENTAL_SYNC_TIMEOUT_SECONDS must be a positive integer")
+	ErrInvalidIncrementalDeleteTimeout = errors.New("INCREMENTAL_DELETE_TIMEOUT_SECONDS must be a positive integer")
+	ErrInvalidIndexConcurrency         = errors.New("INDEX_CONCURRENCY must be a positive integer")
+	ErrInvalidInsertBatchSize          = errors.New("INSERT_BATCH_SIZE must be a positive integer")
+	ErrInvalidInsertConcurrency        = errors.New("INSERT_CONCURRENCY must be a positive integer")
+	ErrInvalidDesktopNotify            = errors.New("DESKTOP_NOTIFICATIONS must be a boolean")
 )
 
 const defaultRerankStrategy = "workers_ai"
 
 const defaultIncrementalSyncTimeoutSeconds = 600
 
+const defaultIncrementalDeleteTimeoutSeconds = 120
+
 var buildVersion = "0.1.0"
 
 // Config holds all runtime configuration for the MCP server.
 type Config struct {
-	WorkerURL              string
-	AuthToken              string
-	EmbeddingDimension     int
-	ChunkSize              int
-	ChunkOverlap           int
-	CustomIgnore           []string
-	ServerName             string
-	ServerVersion          string
-	SplitterType           string        // SPLITTER_TYPE env var: "ast" (default) or "text"
-	RerankStrategy         string        // RERANK_STRATEGY env var: Milvus hybrid rerank strategy ("workers_ai" or "rrf", default workers_ai)
-	SearchMinRerankScore   *float64      // SEARCH_MIN_RERANK_SCORE env var: optional inclusive Workers AI score threshold [0,1]
-	SyncInterval           int           // SYNC_INTERVAL env var: seconds between sync cycles (default 60)
-	IncrementalSyncTimeout time.Duration // INCREMENTAL_SYNC_TIMEOUT_SECONDS env var: maximum duration for one incremental sync (default 600 seconds)
-	IndexConcurrency       int           // INDEX_CONCURRENCY env var: parallel workers for indexing (default: NumCPU)
-	InsertBatchSize        int           // INSERT_BATCH_SIZE env var: entities per insert request (default 192)
-	InsertConcurrency      int           // INSERT_CONCURRENCY env var: concurrent HTTP insert calls to worker (default 2)
-	DesktopNotifications   bool          // DESKTOP_NOTIFICATIONS env var: enable best-effort OS notifications (default false)
+	WorkerURL                string
+	AuthToken                string
+	EmbeddingDimension       int
+	ChunkSize                int
+	ChunkOverlap             int
+	CustomIgnore             []string
+	ServerName               string
+	ServerVersion            string
+	SplitterType             string        // SPLITTER_TYPE env var: "ast" (default) or "text"
+	RerankStrategy           string        // RERANK_STRATEGY env var: Milvus hybrid rerank strategy ("workers_ai" or "rrf", default workers_ai)
+	SearchMinRerankScore     *float64      // SEARCH_MIN_RERANK_SCORE env var: optional inclusive Workers AI score threshold [0,1]
+	SyncInterval             int           // SYNC_INTERVAL env var: seconds between sync cycles (default 60)
+	IncrementalSyncTimeout   time.Duration // INCREMENTAL_SYNC_TIMEOUT_SECONDS env var: maximum duration for the walk, query, and insert phases of one incremental sync (default 600 seconds); delete requests are bounded by INCREMENTAL_DELETE_TIMEOUT_SECONDS
+	IncrementalDeleteTimeout time.Duration // INCREMENTAL_DELETE_TIMEOUT_SECONDS env var: maximum duration of one delete request during an incremental sync (default 120 seconds)
+	IndexConcurrency         int           // INDEX_CONCURRENCY env var: parallel workers for indexing (default: NumCPU)
+	InsertBatchSize          int           // INSERT_BATCH_SIZE env var: entities per insert request (default 192)
+	InsertConcurrency        int           // INSERT_CONCURRENCY env var: concurrent HTTP insert calls to worker (default 2)
+	DesktopNotifications     bool          // DESKTOP_NOTIFICATIONS env var: enable best-effort OS notifications (default false)
 }
 
 func defaultIndexConcurrency(cpuCount int) int {
@@ -194,6 +198,17 @@ func Load() (*Config, error) {
 		incrementalSyncTimeoutSeconds = n
 	}
 
+	incrementalDeleteTimeoutSeconds := defaultIncrementalDeleteTimeoutSeconds
+
+	if v := os.Getenv("INCREMENTAL_DELETE_TIMEOUT_SECONDS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || int64(n) > math.MaxInt64/int64(time.Second) {
+			return nil, fmt.Errorf("%w: %s", ErrInvalidIncrementalDeleteTimeout, v)
+		}
+
+		incrementalDeleteTimeoutSeconds = n
+	}
+
 	indexConcurrency := defaultIndexConcurrency(runtime.NumCPU())
 
 	if v := os.Getenv("INDEX_CONCURRENCY"); v != "" {
@@ -239,22 +254,23 @@ func Load() (*Config, error) {
 	}
 
 	return &Config{
-		WorkerURL:              workerURL,
-		AuthToken:              authToken,
-		EmbeddingDimension:     embeddingDimension,
-		ChunkSize:              chunkSize,
-		ChunkOverlap:           chunkOverlap,
-		CustomIgnore:           splitCSV("CUSTOM_IGNORE_PATTERNS"),
-		ServerName:             serverName,
-		ServerVersion:          serverVersion,
-		SplitterType:           splitterType,
-		RerankStrategy:         rerankStrategy,
-		SearchMinRerankScore:   searchMinRerankScore,
-		SyncInterval:           syncInterval,
-		IncrementalSyncTimeout: time.Duration(incrementalSyncTimeoutSeconds) * time.Second,
-		IndexConcurrency:       indexConcurrency,
-		InsertBatchSize:        insertBatchSize,
-		InsertConcurrency:      insertConcurrency,
-		DesktopNotifications:   desktopNotifications,
+		WorkerURL:                workerURL,
+		AuthToken:                authToken,
+		EmbeddingDimension:       embeddingDimension,
+		ChunkSize:                chunkSize,
+		ChunkOverlap:             chunkOverlap,
+		CustomIgnore:             splitCSV("CUSTOM_IGNORE_PATTERNS"),
+		ServerName:               serverName,
+		ServerVersion:            serverVersion,
+		SplitterType:             splitterType,
+		RerankStrategy:           rerankStrategy,
+		SearchMinRerankScore:     searchMinRerankScore,
+		SyncInterval:             syncInterval,
+		IncrementalSyncTimeout:   time.Duration(incrementalSyncTimeoutSeconds) * time.Second,
+		IncrementalDeleteTimeout: time.Duration(incrementalDeleteTimeoutSeconds) * time.Second,
+		IndexConcurrency:         indexConcurrency,
+		InsertBatchSize:          insertBatchSize,
+		InsertConcurrency:        insertConcurrency,
+		DesktopNotifications:     desktopNotifications,
 	}, nil
 }

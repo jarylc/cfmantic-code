@@ -2,6 +2,7 @@ package filesync
 
 import (
 	"cfmantic-code/internal/walker"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -936,6 +937,72 @@ func TestRunHelpers_HandleEdgeCases(t *testing.T) {
 		require.Len(t, batches, 2)
 		assert.Equal(t, staleIDs[:100], batches[0])
 		assert.Equal(t, staleIDs[100:], batches[1])
+	})
+
+	t.Run("deleteDeletedFiles stops at the first context error", func(t *testing.T) {
+		var deleted []string
+
+		err := deleteDeletedFiles(&ManifestDiff{Changes: []FileChange{
+			{RelPath: "first.go", Type: Deleted},
+			{RelPath: "second.go", Type: Deleted},
+		}}, func(relPath string) error {
+			deleted = append(deleted, relPath)
+
+			return fmt.Errorf("delete chunks for %s: %w", relPath, context.DeadlineExceeded)
+		})
+
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		require.Len(t, deleted, 1, "a dead context must stop the deleted-file loop immediately")
+		assert.Equal(t, "first.go", deleted[0])
+		require.EqualError(t, err, "delete chunks for first.go: context deadline exceeded", "the loop must report the single context error, not one per file")
+	})
+
+	t.Run("deleteModifiedFileChunks stops at the first context error in a batch", func(t *testing.T) {
+		staleIDs := make([]string, 201)
+		for i := range staleIDs {
+			staleIDs[i] = fmt.Sprintf("chunk-stale-%03d", i+1)
+		}
+
+		var batches int
+
+		err := deleteModifiedFileChunks(
+			[]modifiedFileChunkIDs{{relPath: "main.go", ids: staleIDs}},
+			nil,
+			func([]string) error {
+				batches++
+
+				return fmt.Errorf("wrap: %w", context.DeadlineExceeded)
+			},
+			nil,
+		)
+
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		require.Equal(t, 1, batches, "a dead context must stop the batch delete loop immediately")
+		require.EqualError(t, err, "wrap: context deadline exceeded", "the loop must report the single context error, not one per batch")
+	})
+
+	t.Run("deleteModifiedFileChunks stops at the first context error per single id", func(t *testing.T) {
+		staleIDs := make([]string, 5)
+		for i := range staleIDs {
+			staleIDs[i] = fmt.Sprintf("chunk-stale-%03d", i+1)
+		}
+
+		var calls int
+
+		err := deleteModifiedFileChunks(
+			[]modifiedFileChunkIDs{{relPath: "main.go", ids: staleIDs}},
+			nil,
+			nil,
+			func(string) error {
+				calls++
+
+				return fmt.Errorf("wrap: %w", context.Canceled)
+			},
+		)
+
+		require.ErrorIs(t, err, context.Canceled)
+		require.Equal(t, 1, calls, "a canceled context must stop the single-id delete loop immediately")
+		require.EqualError(t, err, "wrap: context canceled", "the loop must report the single context error, not one per id")
 	})
 
 	t.Run("dedupeIDs handles empty blank and duplicate values", func(t *testing.T) {

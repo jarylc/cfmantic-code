@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"time"
 )
 
 // IncrementalParamsConfig contains the shared dependencies for incremental sync callbacks.
@@ -19,6 +20,25 @@ type IncrementalParamsConfig struct {
 	LogPrefix           string
 	IncludePathInErrors bool
 	SaveManifest        func(*FileHashMap, map[string]int) error
+	// DeleteParentContext is nil when deletes use the run context as parent.
+	DeleteParentContext context.Context //nolint:containedctx // context injection is the purpose of this field
+	DeleteTimeout       time.Duration   // <= 0 = delete requests use the run context unchanged
+}
+
+// newDeleteContext derives the context for one delete request. A nil delete
+// parent falls back to the run context; a positive delete timeout gives the
+// request its own budget so the whole-run deadline cannot cut deletes short.
+func newDeleteContext(ctx context.Context, cfg *IncrementalParamsConfig) (context.Context, context.CancelFunc) {
+	base := cfg.DeleteParentContext
+	if base == nil {
+		base = ctx
+	}
+
+	if cfg.DeleteTimeout <= 0 {
+		return base, func() {}
+	}
+
+	return context.WithTimeout(base, cfg.DeleteTimeout)
 }
 
 // NewIncrementalParams builds the shared file hash and stale chunk callbacks.
@@ -72,7 +92,10 @@ func NewIncrementalParams(ctx context.Context, cfg *IncrementalParamsConfig) *In
 			return nonEmptyEntityIDs(entities), nil
 		},
 		DeleteFile: func(relPath string) error {
-			err := cfg.Client.Delete(ctx, collection, fmt.Sprintf("relativePath == %q", relPath))
+			dctx, cancel := newDeleteContext(ctx, cfg)
+			defer cancel()
+
+			err := cfg.Client.Delete(dctx, collection, fmt.Sprintf("relativePath == %q", relPath))
 			if err != nil {
 				if cfg.IncludePathInErrors {
 					err = fmt.Errorf("delete chunks for %s in %s: %w", relPath, cfg.Path, err)
@@ -90,7 +113,10 @@ func NewIncrementalParams(ctx context.Context, cfg *IncrementalParamsConfig) *In
 				return nil
 			}
 
-			err := cfg.Client.Delete(ctx, collection, ExactIDListFilter(ids...))
+			dctx, cancel := newDeleteContext(ctx, cfg)
+			defer cancel()
+
+			err := cfg.Client.Delete(dctx, collection, ExactIDListFilter(ids...))
 			if err != nil {
 				if cfg.IncludePathInErrors {
 					err = fmt.Errorf("delete chunks in %s: %w", cfg.Path, err)
@@ -104,7 +130,10 @@ func NewIncrementalParams(ctx context.Context, cfg *IncrementalParamsConfig) *In
 			return err
 		},
 		DeleteChunkID: func(id string) error {
-			err := cfg.Client.Delete(ctx, collection, ExactIDListFilter(id))
+			dctx, cancel := newDeleteContext(ctx, cfg)
+			defer cancel()
+
+			err := cfg.Client.Delete(dctx, collection, ExactIDListFilter(id))
 			if err != nil {
 				if cfg.IncludePathInErrors {
 					err = fmt.Errorf("delete chunk %s in %s: %w", id, cfg.Path, err)
@@ -149,10 +178,10 @@ func (m *Manager) syncIgnorePatterns(path string) []string {
 }
 
 func (m *Manager) syncRunParams(path string, tracker *snapshot.Tracker) *IncrementalParams {
-	return m.syncRunParamsWithContext(context.Background(), path, tracker)
+	return m.syncRunParamsWithContext(context.Background(), nil, path, tracker)
 }
 
-func (m *Manager) syncRunParamsWithContext(ctx context.Context, path string, tracker *snapshot.Tracker) *IncrementalParams {
+func (m *Manager) syncRunParamsWithContext(ctx, deleteParent context.Context, path string, tracker *snapshot.Tracker) *IncrementalParams {
 	collection := snapshot.CollectionName(path)
 
 	isCanceled := func() bool {
@@ -165,6 +194,8 @@ func (m *Manager) syncRunParamsWithContext(ctx context.Context, path string, tra
 		Client:              m.milvus,
 		LogPrefix:           "sync",
 		IncludePathInErrors: true,
+		DeleteParentContext: deleteParent,
+		DeleteTimeout:       m.cfg.IncrementalDeleteTimeout,
 	})
 
 	params.Boundary = Boundary{

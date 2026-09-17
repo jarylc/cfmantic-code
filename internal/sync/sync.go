@@ -214,15 +214,25 @@ func (m *Manager) syncCodebase(path string) {
 		return
 	}
 
+	// Deletes run on their own budget so a run deadline cannot kill them;
+	// only Stop() or this sync's completion may cancel the delete parent.
+	deleteParent, deleteCancel := context.WithCancel(context.Background())
+
 	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.IncrementalSyncTimeout)
-	if !m.startActiveSync(cancel) {
+
+	cancelAll := func() {
 		cancel()
+		deleteCancel()
+	}
+
+	if !m.startActiveSync(cancelAll) {
+		cancelAll()
 
 		return
 	}
-	defer m.finishActiveSync(cancel)
+	defer m.finishActiveSync(cancelAll)
 
-	RunIncremental(m.syncRunParamsWithContext(ctx, path, tracker))
+	RunIncremental(m.syncRunParamsWithContext(ctx, deleteParent, path, tracker))
 }
 
 func (m *Manager) isStopped() bool {

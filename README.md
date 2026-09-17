@@ -123,7 +123,8 @@ Advanced optional variables:
 - `EMBEDDING_DIMENSION`: embedding size, must be positive, default `1024`
 - `CHUNK_SIZE`: chunk size, must be positive, default `4000`
 - `CHUNK_OVERLAP`: chunk overlap, must be `>= 0` and `< CHUNK_SIZE`, default `200`
-- `INCREMENTAL_SYNC_TIMEOUT_SECONDS`: maximum duration for one manual or background incremental sync, must be positive, default `600`
+- `INCREMENTAL_SYNC_TIMEOUT_SECONDS`: maximum duration for the walk, query, and insert phases of one manual or background incremental sync, must be positive, default `600`; delete requests are bounded by `INCREMENTAL_DELETE_TIMEOUT_SECONDS`
+- `INCREMENTAL_DELETE_TIMEOUT_SECONDS`: maximum duration of one delete request during an incremental sync, must be positive, default `120`
 - `INDEX_CONCURRENCY`: indexing worker count, default is your CPU count / 2
 - `INSERT_BATCH_SIZE`: entities per insert request, default `192`
 - `INSERT_CONCURRENCY`: concurrent insert requests, default `4`
@@ -132,35 +133,35 @@ Advanced optional variables:
 
 ```mermaid
 sequenceDiagram
-    autonumber
-    participant C as cfmantic-code
-    participant W as cf-workers-cfmantic-code
+   autonumber
+   participant C as cfmantic-code
+   participant W as cf-workers-cfmantic-code
 
-    Note over C,W: cfmantic-code reads WORKER_URL and AUTH_TOKEN at startup
-    Note over C,W: All worker calls are JSON POST requests with Bearer auth
+   Note over C,W: cfmantic-code reads WORKER_URL and AUTH_TOKEN at startup
+   Note over C,W: All worker calls are JSON POST requests with Bearer auth
 
-    C->>W: /v2/vectordb/collections/create
-    Note right of W: Full index setup<br/>Creates collection with BM25 enabled
+   C->>W: /v2/vectordb/collections/create
+   Note right of W: Full index setup<br/>Creates collection with BM25 enabled
 
-    C->>W: /v2/vectordb/entities/insert
-    Note right of W: Insert chunked file content<br/>Worker generates embeddings
+   C->>W: /v2/vectordb/entities/insert
+   Note right of W: Insert chunked file content<br/>Worker generates embeddings
 
-    C->>W: /v2/vectordb/collections/has
-    Note right of W: Incremental sync preflight
+   C->>W: /v2/vectordb/collections/has
+   Note right of W: Incremental sync preflight
 
-    C->>W: /v2/vectordb/entities/query
-    Note right of W: Load existing chunks for changed paths
+   C->>W: /v2/vectordb/entities/query
+   Note right of W: Load existing chunks for changed paths
 
-    C->>W: /v2/vectordb/entities/delete
-    C->>W: /v2/vectordb/entities/insert
-    Note right of W: Refresh changed files by delete + insert<br/>(no direct upsert flow in this repo)
+   C->>W: /v2/vectordb/entities/delete
+   C->>W: /v2/vectordb/entities/insert
+   Note right of W: Refresh changed files by delete + insert<br/>(no direct upsert flow in this repo)
 
-    C->>W: /v2/vectordb/entities/hybrid_search
-    W-->>C: Ranked chunk matches
-    Note right of W: Dense + BM25 search with rerank
+   C->>W: /v2/vectordb/entities/hybrid_search
+   W-->>C: Ranked chunk matches
+   Note right of W: Dense + BM25 search with rerank
 
-    C->>W: /v2/vectordb/collections/drop
-    Note right of W: clear_index removes the remote collection
+   C->>W: /v2/vectordb/collections/drop
+   Note right of W: clear_index removes the remote collection
 ```
 
 ## MCP Tools

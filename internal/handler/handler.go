@@ -430,8 +430,7 @@ func (e *remoteClearedLocalPreservedError) Unwrap() error {
 }
 
 func formatIndexPathRepairError(err error, path string) string {
-	var preserved *remoteClearedLocalPreservedError
-	if errors.As(err, &preserved) {
+	if _, ok := errors.AsType[*remoteClearedLocalPreservedError](err); ok { //nolint:errcheck // only the match matters, err carries the details
 		return formatClearIndexError(err, path)
 	}
 
@@ -439,8 +438,7 @@ func formatIndexPathRepairError(err error, path string) string {
 }
 
 func formatClearIndexError(err error, path string) string {
-	var preserved *remoteClearedLocalPreservedError
-	if errors.As(err, &preserved) {
+	if _, ok := errors.AsType[*remoteClearedLocalPreservedError](err); ok { //nolint:errcheck // only the match matters, err carries the details
 		return "Failed to clear index: remote index was cleared, but local state was preserved because another process is indexing. Details: " + formatMilvusToolError(err, path)
 	}
 
@@ -1171,10 +1169,14 @@ func (h *Handler) backgroundIndex(ctx context.Context, path, collection string, 
 func (h *Handler) incrementalIndex(ctx context.Context, path string, ignorePatterns []string, tracker *snapshot.Tracker, cleanup func()) {
 	defer cleanup()
 
+	// Deletes get their own budget, so keep the pre-timeout parent that only
+	// cancellation (Stop, user cancel) can abort.
+	deleteParent := ctx
+
 	ctx, cancel := context.WithTimeout(ctx, h.cfg.IncrementalSyncTimeout)
 	defer cancel()
 
-	filesync.RunIncremental(h.incrementalRunParams(ctx, path, ignorePatterns, tracker))
+	filesync.RunIncremental(h.incrementalRunParams(ctx, deleteParent, path, ignorePatterns, tracker))
 }
 
 func (h *Handler) startManualIndex(parent context.Context, path string) (context.Context, func()) {

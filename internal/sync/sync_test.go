@@ -402,6 +402,7 @@ func TestStop_CancelsActiveBackgroundSync(t *testing.T) {
 func TestSyncCodebase_TimeoutDuringFinalizationCleansUp(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.IncrementalSyncTimeout = time.Second
+	cfg.IncrementalDeleteTimeout = time.Second
 	mc := mocks.NewMockVectorClient(t)
 	sp := mocks.NewMockSplitter(t)
 	sm := snapshot.NewManager()

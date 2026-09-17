@@ -50,7 +50,7 @@ func TestIncrementalRunParams_ExtraCleanupReleasesSemaphore(t *testing.T) {
 
 	path := t.TempDir()
 	tracker := snapshot.NewTracker(snapshot.NewManager(), path, snapshot.OperationMetadata{})
-	params := h.incrementalRunParams(context.Background(), path, nil, tracker)
+	params := h.incrementalRunParams(context.Background(), nil, path, nil, tracker)
 	require.NotNil(t, params)
 	require.Len(t, params.Boundary.ExtraCleanups, 1)
 
@@ -170,7 +170,7 @@ func TestIncrementalRunParams_AfterSuccessPersistsEffectiveIgnorePatterns(t *tes
 	sm.SetIndexed(path, 1, 2)
 
 	tracker := snapshot.NewTracker(sm, path, snapshot.OperationMetadata{})
-	params := h.incrementalRunParams(context.Background(), path, []string{"request-only/"}, tracker)
+	params := h.incrementalRunParams(context.Background(), nil, path, []string{"request-only/"}, tracker)
 	require.NotNil(t, params)
 	require.NotNil(t, params.AfterSuccess)
 
@@ -235,7 +235,7 @@ func TestIncrementalRunParams_AfterSuccessSkipsFollowUpsOnPersistenceFailure(t *
 	prepareFailedSnapshotForAfterSuccess(t, sm, path)
 
 	tracker := snapshot.NewTracker(sm, path, snapshot.OperationMetadata{})
-	params := h.incrementalRunParams(context.Background(), path, []string{"request-only/"}, tracker)
+	params := h.incrementalRunParams(context.Background(), nil, path, []string{"request-only/"}, tracker)
 	require.NotNil(t, params.AfterSuccess)
 
 	params.AfterSuccess()
@@ -259,7 +259,7 @@ func TestIncrementalRunParams_ModifiedFileChunkCallbacksUseSafeFilters(t *testin
 	path := t.TempDir()
 	collection := snapshot.CollectionName(path)
 	tracker := snapshot.NewTracker(sm, path, snapshot.OperationMetadata{})
-	params := h.incrementalRunParams(context.Background(), path, nil, tracker)
+	params := h.incrementalRunParams(context.Background(), nil, path, nil, tracker)
 	require.NotNil(t, params)
 
 	mc.On("Query", mock.Anything, collection, `relativePath == "main.go"`, 2).Return([]milvus.Entity{{ID: "chunk-a"}, {ID: "chunk-b"}}, nil).Once()
@@ -303,7 +303,7 @@ func TestIncrementalRunParams_QueryFileChunkIDs_LimitZeroReturnsNil(t *testing.T
 
 	path := t.TempDir()
 	tracker := snapshot.NewTracker(sm, path, snapshot.OperationMetadata{})
-	params := h.incrementalRunParams(context.Background(), path, nil, tracker)
+	params := h.incrementalRunParams(context.Background(), nil, path, nil, tracker)
 
 	ids, err := params.QueryFileChunkIDs("main.go", 0)
 	require.NoError(t, err)
@@ -319,7 +319,7 @@ func TestIncrementalRunParams_QueryFileChunkIDs_Error(t *testing.T) {
 	path := t.TempDir()
 	collection := snapshot.CollectionName(path)
 	tracker := snapshot.NewTracker(sm, path, snapshot.OperationMetadata{})
-	params := h.incrementalRunParams(context.Background(), path, nil, tracker)
+	params := h.incrementalRunParams(context.Background(), nil, path, nil, tracker)
 
 	mc.On("Query", mock.Anything, collection, `relativePath == "main.go"`, 1).Return([]milvus.Entity(nil), assert.AnError).Once()
 
@@ -338,7 +338,7 @@ func TestIncrementalRunParams_QueryFileChunkIDs_SkipsEmptyIDs(t *testing.T) {
 	path := t.TempDir()
 	collection := snapshot.CollectionName(path)
 	tracker := snapshot.NewTracker(sm, path, snapshot.OperationMetadata{})
-	params := h.incrementalRunParams(context.Background(), path, nil, tracker)
+	params := h.incrementalRunParams(context.Background(), nil, path, nil, tracker)
 
 	mc.On("Query", mock.Anything, collection, `relativePath == "main.go"`, 3).Return([]milvus.Entity{{ID: ""}, {ID: "chunk-a"}, {ID: "chunk-b"}}, nil).Once()
 
@@ -356,7 +356,7 @@ func TestIncrementalRunParams_DeleteChunkID_Error(t *testing.T) {
 	path := t.TempDir()
 	collection := snapshot.CollectionName(path)
 	tracker := snapshot.NewTracker(sm, path, snapshot.OperationMetadata{})
-	params := h.incrementalRunParams(context.Background(), path, nil, tracker)
+	params := h.incrementalRunParams(context.Background(), nil, path, nil, tracker)
 
 	mc.On("Delete", mock.Anything, collection, `id in ["chunk-stale"]`).Return(assert.AnError).Once()
 
@@ -373,7 +373,7 @@ func TestIncrementalRunParams_CurrentTotalChunksWithoutSnapshotInfo(t *testing.T
 
 	path := t.TempDir()
 	tracker := snapshot.NewTracker(sm, path, snapshot.OperationMetadata{})
-	params := h.incrementalRunParams(context.Background(), path, nil, tracker)
+	params := h.incrementalRunParams(context.Background(), nil, path, nil, tracker)
 
 	total, ok := params.CurrentTotalChunks()
 	assert.False(t, ok)
@@ -392,7 +392,7 @@ func TestIncrementalRunParams_AfterSuccessTracksPathWithSyncMgr(t *testing.T) {
 	sm.SetIndexed(path, 1, 2)
 
 	tracker := snapshot.NewTracker(sm, path, snapshot.OperationMetadata{})
-	params := h.incrementalRunParams(context.Background(), path, nil, tracker)
+	params := h.incrementalRunParams(context.Background(), nil, path, nil, tracker)
 	require.NotNil(t, params.AfterSuccess)
 
 	params.AfterSuccess()

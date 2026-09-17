@@ -95,6 +95,7 @@ func (h *Handler) fullRunParams(
 
 func (h *Handler) incrementalRunParams(
 	ctx context.Context,
+	deleteParent context.Context,
 	path string,
 	ignorePatterns []string,
 	tracker *snapshot.Tracker,
@@ -107,10 +108,12 @@ func (h *Handler) incrementalRunParams(
 	)
 
 	params := filesync.NewIncrementalParams(ctx, &filesync.IncrementalParamsConfig{
-		Path:       path,
-		Collection: collectionName,
-		Client:     h.milvus,
-		LogPrefix:  "handler",
+		Path:                path,
+		Collection:          collectionName,
+		Client:              h.milvus,
+		LogPrefix:           "handler",
+		DeleteParentContext: deleteParent,
+		DeleteTimeout:       h.cfg.IncrementalDeleteTimeout,
 		SaveManifest: func(manifest *filesync.FileHashMap, chunkCounts map[string]int) error {
 			return h.saveManifest(path, manifest, chunkCounts)
 		},

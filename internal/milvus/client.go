@@ -352,6 +352,15 @@ func (c *Client) do(ctx context.Context, path string, reqBody, result any) error
 	// Keep one loop for all retry paths; network/HTTP errors still stop at
 	// maxRetries, while retryable API capacity errors may use the larger budget.
 	for attempt := 0; attempt <= retryableAPIMaxRetries; attempt++ {
+		// An already-dead context must fail here instead of reaching the
+		// backoff sleep, which would mask the real cause as an interruption.
+		// A nil context falls through; NewRequestWithContext reports it.
+		if ctx != nil {
+			if err := ctx.Err(); err != nil {
+				return fmt.Errorf("milvus: POST %s: %w", path, err)
+			}
+		}
+
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(body))
 		if err != nil {
 			return fmt.Errorf("milvus: create request: %w", err)
