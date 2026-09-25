@@ -4465,7 +4465,8 @@ func TestProcessFiles_SplitterReturnsNoChunks(t *testing.T) {
 	assert.Empty(t, result.err)
 }
 
-func TestProcessFiles_UnreadableFile(t *testing.T) {
+func TestProcessFiles_MissingFileSkipped(t *testing.T) {
+	// The file was deleted after discovery. The pipeline skips it and the run completes.
 	mc := mocks.NewMockVectorClient(t)
 	sm := mocks.NewMockStatusManager(t)
 	sp := mocks.NewMockSplitter(t)
@@ -4479,8 +4480,35 @@ func TestProcessFiles_UnreadableFile(t *testing.T) {
 
 	result := h.processFiles(context.Background(), dir, "col", files, nil, false)
 	assert.Equal(t, 0, result.totalChunks)
+	assert.Empty(t, result.err)
+}
+
+func TestProcessFiles_UnreadableFile(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("cannot test filesystem permission errors when running as root")
+	}
+
+	// A file that exists but cannot be read still fails the run.
+	mc := mocks.NewMockVectorClient(t)
+	sm := mocks.NewMockStatusManager(t)
+	sp := mocks.NewMockSplitter(t)
+	h := newTestHandler(t, mc, sm, sp, nil)
+
+	dir := t.TempDir()
+
+	goFile := filepath.Join(dir, "file.go")
+	require.NoError(t, os.WriteFile(goFile, []byte("package main\n"), 0o644))
+	require.NoError(t, os.Chmod(goFile, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(goFile, 0o644) }) // restore for t.TempDir cleanup
+
+	files := []walker.CodeFile{
+		{AbsPath: goFile, RelPath: "file.go", Extension: ".go"},
+	}
+
+	result := h.processFiles(context.Background(), dir, "col", files, nil, false)
+	assert.Equal(t, 0, result.totalChunks)
 	assert.Contains(t, result.err, "file.go")
-	assert.Contains(t, result.err, "no such file or directory")
+	assert.Contains(t, result.err, "permission denied")
 }
 
 func TestProcessFiles_InsertError(t *testing.T) {

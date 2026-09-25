@@ -998,7 +998,8 @@ func TestProcessFiles_SplitterReturnsNoChunks(t *testing.T) {
 	assert.Empty(t, result.err)
 }
 
-func TestProcessFiles_UnreadableFile(t *testing.T) {
+func TestProcessFiles_MissingFileSkipped(t *testing.T) {
+	// The file was deleted after discovery. The pipeline skips it and the run completes.
 	mc := mocks.NewMockVectorClient(t)
 	sm := mocks.NewMockStatusManager(t)
 	sp := mocks.NewMockSplitter(t)
@@ -1012,8 +1013,35 @@ func TestProcessFiles_UnreadableFile(t *testing.T) {
 
 	result := h.processFiles(context.Background(), dir, "col", files, nil, false)
 	assert.Equal(t, 0, result.totalChunks)
+	assert.Empty(t, result.err)
+}
+
+func TestProcessFiles_UnreadableFile(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("cannot test filesystem permission errors when running as root")
+	}
+
+	// A file that exists but cannot be read still fails the run.
+	mc := mocks.NewMockVectorClient(t)
+	sm := mocks.NewMockStatusManager(t)
+	sp := mocks.NewMockSplitter(t)
+	h := newTestHandler(t, mc, sm, sp, nil)
+
+	dir := t.TempDir()
+
+	goFile := filepath.Join(dir, "file.go")
+	require.NoError(t, os.WriteFile(goFile, []byte("package main\n"), 0o644))
+	require.NoError(t, os.Chmod(goFile, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(goFile, 0o644) }) // restore for t.TempDir cleanup
+
+	files := []walker.CodeFile{
+		{AbsPath: goFile, RelPath: "file.go", Extension: ".go"},
+	}
+
+	result := h.processFiles(context.Background(), dir, "col", files, nil, false)
+	assert.Equal(t, 0, result.totalChunks)
 	assert.Contains(t, result.err, "file.go")
-	assert.Contains(t, result.err, "no such file or directory")
+	assert.Contains(t, result.err, "permission denied")
 }
 
 func TestProcessFiles_InsertError(t *testing.T) {
@@ -1092,225 +1120,225 @@ func TestHandleIndex_BackgroundIndex_InsertError(t *testing.T) {
 Symbol: TestBuildRelativePathFilter_PreservesLiteralPercentAndUnderscoreForWorkerPrefixContract (function, lines 1732-1746)
 ```go
 func TestHandleIndex_WithIgnorePatterns(t *testing.T) {
-	// Verify handler accepts ignorePatterns and starts indexing.
-	mc := mocks.NewMockVectorClient(t)
-	sm := mocks.NewMockStatusManager(t)
-	sp := mocks.NewMockSplitter(t)
-	h := newTestHandler(t, mc, sm, sp, nil)
+// Verify handler accepts ignorePatterns and starts indexing.
+mc := mocks.NewMockVectorClient(t)
+sm := mocks.NewMockStatusManager(t)
+sp := mocks.NewMockSplitter(t)
+h := newTestHandler(t, mc, sm, sp, nil)
 
-	dir := t.TempDir()
-	collection := snapshot.CollectionName(dir)
+dir := t.TempDir()
+collection := snapshot.CollectionName(dir)
 
-	sm.On("IsIndexing", dir).Return(false)
-	sm.On("GetStatus", dir).Return(snapshot.StatusNotFound)
-	mc.On("CreateCollection", mock.Anything, collection, h.cfg.EmbeddingDimension, true).Return(nil)
-	sm.On("SetStep", dir, "Starting").Return()
-	sm.On("SetStep", dir, "Walking files").Return()
-	sm.On("SetStep", dir, "Indexing 0 files").Return()
+sm.On("IsIndexing", dir).Return(false)
+sm.On("GetStatus", dir).Return(snapshot.StatusNotFound)
+mc.On("CreateCollection", mock.Anything, collection, h.cfg.EmbeddingDimension, true).Return(nil)
+sm.On("SetStep", dir, "Starting").Return()
+sm.On("SetStep", dir, "Walking files").Return()
+sm.On("SetStep", dir, "Indexing 0 files").Return()
 
-	done := make(chan struct{})
+done := make(chan struct{})
 
-	sm.On("SetIndexed", dir, 0, 0).Run(func(args mock.Arguments) { close(done) }).Return()
+sm.On("SetIndexed", dir, 0, 0).Run(func(args mock.Arguments) { close(done) }).Return()
 
-	res, err := h.HandleIndex(context.Background(), makeReq(map[string]any{
-		"path":           dir,
-		"ignorePatterns": []string{"vendor/"},
-		"async":          true,
-	}))
-	require.NoError(t, err)
-	assert.False(t, res.IsError)
+res, err := h.HandleIndex(context.Background(), makeReq(map[string]any{
+"path":           dir,
+"ignorePatterns": []string{"vendor/"},
+"async":          true,
+}))
+require.NoError(t, err)
+assert.False(t, res.IsError)
 
-	waitForDone(t, done, 5*time.Second)
+waitForDone(t, done, 5*time.Second)
 
-	// Wait for goroutine to fully exit (saveHashes writes to .cfmantic after SetIndexed).
-	lockPath := snapshot.LockFilePath(dir)
+// Wait for goroutine to fully exit (saveHashes writes to .cfmantic after SetIndexed).
+lockPath := snapshot.LockFilePath(dir)
 
-	require.Eventually(t, func() bool {
-		_, err := os.Stat(lockPath)
-		return os.IsNotExist(err)
-	}, 5*time.Second, 5*time.Millisecond, "background goroutine did not exit in time")
+require.Eventually(t, func() bool {
+_, err := os.Stat(lockPath)
+return os.IsNotExist(err)
+}, 5*time.Second, 5*time.Millisecond, "background goroutine did not exit in time")
 }
 
 func TestWalkFiles_IncludesUnsupportedTextFiles(t *testing.T) {
-	mc := mocks.NewMockVectorClient(t)
-	sm := mocks.NewMockStatusManager(t)
-	sp := mocks.NewMockSplitter(t)
-	h := newTestHandler(t, mc, sm, sp, nil)
+mc := mocks.NewMockVectorClient(t)
+sm := mocks.NewMockStatusManager(t)
+sp := mocks.NewMockSplitter(t)
+h := newTestHandler(t, mc, sm, sp, nil)
 
-	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "README"), []byte("docs\n"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("hello\n"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "template.hbs"), []byte("{{title}}\n"), 0o644))
+dir := t.TempDir()
+require.NoError(t, os.WriteFile(filepath.Join(dir, "README"), []byte("docs\n"), 0o644))
+require.NoError(t, os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("hello\n"), 0o644))
+require.NoError(t, os.WriteFile(filepath.Join(dir, "template.hbs"), []byte("{{title}}\n"), 0o644))
 
-	files, err := h.walkFiles(context.Background(), dir, nil)
-	require.NoError(t, err)
-	assert.Equal(t, []string{"README", "notes.txt", "template.hbs"}, relPaths(files))
+files, err := h.walkFiles(context.Background(), dir, nil)
+require.NoError(t, err)
+assert.Equal(t, []string{"README", "notes.txt", "template.hbs"}, relPaths(files))
 }
 
 // ─── buildExtensionFilter ─────────────────────────────────────────────────────
 
 func TestBuildExtensionFilter_Empty(t *testing.T) {
-	assert.Empty(t, buildExtensionFilter([]string{}))
+assert.Empty(t, buildExtensionFilter([]string{}))
 }
 
 func TestBuildExtensionFilter_SingleWithDot(t *testing.T) {
-	assert.Equal(t, `fileExtension in ["go"]`, buildExtensionFilter([]string{".go"}))
+assert.Equal(t, `fileExtension in ["go"]`, buildExtensionFilter([]string{".go"}))
 }
 
 func TestBuildExtensionFilter_SingleWithoutDot(t *testing.T) {
-	assert.Equal(t, `fileExtension in ["ts"]`, buildExtensionFilter([]string{"ts"}))
+assert.Equal(t, `fileExtension in ["ts"]`, buildExtensionFilter([]string{"ts"}))
 }
 
 func TestBuildExtensionFilter_SkipsEmpty(t *testing.T) {
-	assert.Empty(t, buildExtensionFilter([]string{"."}))
+assert.Empty(t, buildExtensionFilter([]string{"."}))
 }
 
 func TestBuildExtensionFilter_MultipleExtensions(t *testing.T) {
-	assert.Equal(t, `fileExtension in ["go", "ts"]`, buildExtensionFilter([]string{".go", ".ts"}))
+assert.Equal(t, `fileExtension in ["go", "ts"]`, buildExtensionFilter([]string{".go", ".ts"}))
 }
 
 func TestBuildExtensionFilter_SkipsDotOnlyEntries(t *testing.T) {
-	assert.Equal(t, `fileExtension in ["go"]`, buildExtensionFilter([]string{".", ".go", "."}))
+assert.Equal(t, `fileExtension in ["go"]`, buildExtensionFilter([]string{".", ".go", "."}))
 }
 
 func TestBuildRelativePathFilter_SameRoot(t *testing.T) {
-	root := t.TempDir()
+root := t.TempDir()
 
-	filter, err := buildRelativePathFilter(root, root)
-	require.NoError(t, err)
-	assert.Empty(t, filter)
+filter, err := buildRelativePathFilter(root, root)
+require.NoError(t, err)
+assert.Empty(t, filter)
 }
 
 func TestBuildRelativePathFilter_Subdirectory(t *testing.T) {
-	root := t.TempDir()
-	child := filepath.Join(root, "pkg", "service")
-	require.NoError(t, os.MkdirAll(child, 0o755))
+root := t.TempDir()
+child := filepath.Join(root, "pkg", "service")
+require.NoError(t, os.MkdirAll(child, 0o755))
 
-	filter, err := buildRelativePathFilter(root, child)
-	require.NoError(t, err)
-	assert.Equal(t, `relativePath like "pkg/service/%"`, filter)
+filter, err := buildRelativePathFilter(root, child)
+require.NoError(t, err)
+assert.Equal(t, `relativePath like "pkg/service/%"`, filter)
 }
 
 func TestBuildRelativePathFilter_PreservesLiteralPercentAndUnderscoreForWorkerPrefixContract(t *testing.T) {
-	root := t.TempDir()
-	child := filepath.Join(root, "pkg", "100%_done")
-	require.NoError(t, os.MkdirAll(child, 0o755))
+root := t.TempDir()
+child := filepath.Join(root, "pkg", "100%_done")
+require.NoError(t, os.MkdirAll(child, 0o755))
 
-	filter, err := buildRelativePathFilter(root, child)
-	require.NoError(t, err)
-	// CFmantic Code talks to the custom cf-workers-milvus worker, which compiles
-	// prefix LIKE filters into literal range queries for SQL/Vectorize. `%` and
-	// `_` inside the subtree prefix are therefore real path bytes, not native
-	// Milvus wildcards, and must be preserved.
-	assert.Equal(t, `relativePath like "pkg/100%_done/%"`, filter)
-	assert.NotContains(t, filter, `\\%`)
-	assert.NotContains(t, filter, `\\_`)
+filter, err := buildRelativePathFilter(root, child)
+require.NoError(t, err)
+// CFmantic Code talks to the custom cf-workers-milvus worker, which compiles
+// prefix LIKE filters into literal range queries for SQL/Vectorize. `%` and
+// `_` inside the subtree prefix are therefore real path bytes, not native
+// Milvus wildcards, and must be preserved.
+assert.Equal(t, `relativePath like "pkg/100%_done/%"`, filter)
+assert.NotContains(t, filter, `\\%`)
+assert.NotContains(t, filter, `\\_`)
 }
 
 func TestBuildRelativePathFilter_EscapesBackslashes(t *testing.T) {
-	root := t.TempDir()
-	child := filepath.Join(root, "pkg") + `/dir\name`
-	require.NoError(t, os.MkdirAll(child, 0o755))
+root := t.TempDir()
+child := filepath.Join(root, "pkg") + `/dir\name`
+require.NoError(t, os.MkdirAll(child, 0o755))
 
-	filter, err := buildRelativePathFilter(root, child)
-	require.NoError(t, err)
-	assert.Equal(t, `relativePath like "pkg/dir\\\\name/%"`, filter)
+filter, err := buildRelativePathFilter(root, child)
+require.NoError(t, err)
+assert.Equal(t, `relativePath like "pkg/dir\\\\name/%"`, filter)
 }
 
 func TestBuildSearchFilter_PathAndExtension(t *testing.T) {
-	assert.Equal(t,
-		`relativePath like "pkg/service/%" and fileExtension in ["go", "ts"]`,
-		buildSearchFilter([]string{".go", ".ts"}, `relativePath like "pkg/service/%"`),
-	)
+assert.Equal(t,
+`relativePath like "pkg/service/%" and fileExtension in ["go", "ts"]`,
+buildSearchFilter([]string{".go", ".ts"}, `relativePath like "pkg/service/%"`),
+)
 }
 
 func TestBuildSearchFilter_PreservesLiteralPercentAndUnderscoreForWorkerPrefixContract(t *testing.T) {
-	assert.Equal(t,
-		`relativePath like "pkg/100%_done/%" and fileExtension in ["go"]`,
-		buildSearchFilter([]string{".go"}, `relativePath like "pkg/100%_done/%"`),
-	)
+assert.Equal(t,
+`relativePath like "pkg/100%_done/%" and fileExtension in ["go"]`,
+buildSearchFilter([]string{".go"}, `relativePath like "pkg/100%_done/%"`),
+)
 }
 
 // ─── HandleSearch ─────────────────────────────────────────────────────────────
 
 func TestHandleSearch_SymlinkResolved(t *testing.T) {
-	// Symlink path should resolve; downstream mocks receive canonical path.
-	mc := mocks.NewMockVectorClient(t)
-	sm := mocks.NewMockStatusManager(t)
-	sp := mocks.NewMockSplitter(t)
-	h := newTestHandler(t, mc, sm, sp, nil)
+// Symlink path should resolve; downstream mocks receive canonical path.
+mc := mocks.NewMockVectorClient(t)
+sm := mocks.NewMockStatusManager(t)
+sp := mocks.NewMockSplitter(t)
+h := newTestHandler(t, mc, sm, sp, nil)
 
-	realDir := t.TempDir()
-	linkParent := t.TempDir()
-	link := filepath.Join(linkParent, "link")
-	require.NoError(t, os.Symlink(realDir, link))
+realDir := t.TempDir()
+linkParent := t.TempDir()
+link := filepath.Join(linkParent, "link")
+require.NoError(t, os.Symlink(realDir, link))
 
-	sm.On("GetStatus", mock.Anything).Return(snapshot.StatusNotFound)
+sm.On("GetStatus", mock.Anything).Return(snapshot.StatusNotFound)
 
-	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
-		"path":  link,
-		"query": "test",
-	}))
-	require.NoError(t, err)
-	requireErrorResult(t, res, "not indexed")
+res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
+"path":  link,
+"query": "test",
+}))
+require.NoError(t, err)
+requireErrorResult(t, res, "not indexed")
 }
 
 func TestHandleSearch_MissingPath(t *testing.T) {
-	mc := mocks.NewMockVectorClient(t)
-	sm := mocks.NewMockStatusManager(t)
-	sp := mocks.NewMockSplitter(t)
-	h := newTestHandler(t, mc, sm, sp, nil)
+mc := mocks.NewMockVectorClient(t)
+sm := mocks.NewMockStatusManager(t)
+sp := mocks.NewMockSplitter(t)
+h := newTestHandler(t, mc, sm, sp, nil)
 
-	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{}))
-	require.NoError(t, err)
-	requireErrorResult(t, res, "required argument")
+res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{}))
+require.NoError(t, err)
+requireErrorResult(t, res, "required argument")
 }
 
 func TestHandleSearch_MissingQuery(t *testing.T) {
-	mc := mocks.NewMockVectorClient(t)
-	sm := mocks.NewMockStatusManager(t)
-	sp := mocks.NewMockSplitter(t)
-	h := newTestHandler(t, mc, sm, sp, nil)
+mc := mocks.NewMockVectorClient(t)
+sm := mocks.NewMockStatusManager(t)
+sp := mocks.NewMockSplitter(t)
+h := newTestHandler(t, mc, sm, sp, nil)
 
-	dir := t.TempDir()
+dir := t.TempDir()
 
-	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
-		"path": dir,
-	}))
-	require.NoError(t, err)
-	requireErrorResult(t, res, "required argument")
+res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
+"path": dir,
+}))
+require.NoError(t, err)
+requireErrorResult(t, res, "required argument")
 }
 
 func TestHandleSearch_PathStatFails(t *testing.T) {
-	mc := mocks.NewMockVectorClient(t)
-	sm := mocks.NewMockStatusManager(t)
-	sp := mocks.NewMockSplitter(t)
-	h := newTestHandler(t, mc, sm, sp, nil)
+mc := mocks.NewMockVectorClient(t)
+sm := mocks.NewMockStatusManager(t)
+sp := mocks.NewMockSplitter(t)
+h := newTestHandler(t, mc, sm, sp, nil)
 
-	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
-		"path":  "/nonexistent/path",
-		"query": "test query",
-	}))
-	require.NoError(t, err)
-	requireErrorResult(t, res, "path does not exist or is not a directory")
+res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
+"path":  "/nonexistent/path",
+"query": "test query",
+}))
+require.NoError(t, err)
+requireErrorResult(t, res, "path does not exist or is not a directory")
 }
 
 func TestHandleSearch_StatusNotFound(t *testing.T) {
-	mc := mocks.NewMockVectorClient(t)
-	sm := mocks.NewMockStatusManager(t)
-	sp := mocks.NewMockSplitter(t)
-	h := newTestHandler(t, mc, sm, sp, nil)
+mc := mocks.NewMockVectorClient(t)
+sm := mocks.NewMockStatusManager(t)
+sp := mocks.NewMockSplitter(t)
+h := newTestHandler(t, mc, sm, sp, nil)
 
-	dir := t.TempDir()
+dir := t.TempDir()
 
-	sm.On("GetStatus", mock.Anything).Return(snapshot.StatusNotFound)
+sm.On("GetStatus", mock.Anything).Return(snapshot.StatusNotFound)
 
-	res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
-		"path":  dir,
-		"query": "test",
-	}))
-	require.NoError(t, err)
-	requireErrorResult(t, res, "not indexed")
+res, err := h.HandleSearch(context.Background(), makeReq(map[string]any{
+"path":  dir,
+"query": "test",
+}))
+require.NoError(t, err)
+requireErrorResult(t, res, "not indexed")
 }
 
 
@@ -2879,204 +2907,204 @@ func (e *searchResultEnricher) readFreshFileSymbols(relPath string) cachedSearch
 // ─── incrementalIndex: Delete error → SetFailed + early return ───────────────
 
 func TestHandleIndex_IncrementalIndex_DeleteError_SetsFailedAndReturnsEarly(t *testing.T) {
-	// Scenario: TempDir has main.go (unchanged) and oldHashes has main.go + deleted.go.
-	// Diff: deleted.go is Deleted (changes > 0), main.go unchanged.
-	// Delete returns error → SetFailed is called and function returns early.
-	// saveHashes and SetIndexed must NOT be called.
-	mc := mocks.NewMockVectorClient(t)
-	sm := mocks.NewMockStatusManager(t)
-	sp := mocks.NewMockSplitter(t)
-	h := newTestHandler(t, mc, sm, sp, nil)
+// Scenario: TempDir has main.go (unchanged) and oldHashes has main.go + deleted.go.
+// Diff: deleted.go is Deleted (changes > 0), main.go unchanged.
+// Delete returns error → SetFailed is called and function returns early.
+// saveHashes and SetIndexed must NOT be called.
+mc := mocks.NewMockVectorClient(t)
+sm := mocks.NewMockStatusManager(t)
+sp := mocks.NewMockSplitter(t)
+h := newTestHandler(t, mc, sm, sp, nil)
 
-	dir := t.TempDir()
-	collection := snapshot.CollectionName(dir)
+dir := t.TempDir()
+collection := snapshot.CollectionName(dir)
 
-	// Create main.go and compute its real hash
-	goFile := filepath.Join(dir, "main.go")
-	content := []byte("package main\n")
-	require.NoError(t, os.WriteFile(goFile, content, 0o644))
+// Create main.go and compute its real hash
+goFile := filepath.Join(dir, "main.go")
+content := []byte("package main\n")
+require.NoError(t, os.WriteFile(goFile, content, 0o644))
 
-	// Compute the real hash of main.go using filesync helpers so it matches exactly
-	newHashes, err := filesync.ComputeFileHashMap([]walker.CodeFile{
-		{AbsPath: goFile, RelPath: "main.go", Extension: ".go"},
-	})
-	require.NoError(t, err)
+// Compute the real hash of main.go using filesync helpers so it matches exactly
+newHashes, err := filesync.ComputeFileHashMap([]walker.CodeFile{
+{AbsPath: goFile, RelPath: "main.go", Extension: ".go"},
+})
+require.NoError(t, err)
 
-	mainHash := newHashes.Files["main.go"].Hash
+mainHash := newHashes.Files["main.go"].Hash
 
-	hashMap := filesync.NewFileHashMap()
-	hashMap.Files["main.go"] = filesync.FileEntry{Hash: mainHash, ChunkCount: 7}
-	hashMap.Files["deleted.go"] = filesync.FileEntry{Hash: "deadbeef", ChunkCount: 3}
-	require.NoError(t, hashMap.Save(filesync.HashFilePath(dir)))
+hashMap := filesync.NewFileHashMap()
+hashMap.Files["main.go"] = filesync.FileEntry{Hash: mainHash, ChunkCount: 7}
+hashMap.Files["deleted.go"] = filesync.FileEntry{Hash: "deadbeef", ChunkCount: 3}
+require.NoError(t, hashMap.Save(filesync.HashFilePath(dir)))
 
-	// Walker finds main.go → Diff: deleted.go is Deleted, main.go unchanged → changes=[{deleted.go,Deleted}]
-	sm.On("IsIndexing", dir).Return(false)
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
-	expectRemoteCollectionExists(mc, dir)
-	sm.On("SetStep", dir, "Starting incremental sync").Return()
-	sm.On("SetStep", dir, "Walking files").Return()
-	sm.On("SetStep", dir, "Computing file changes").Return()
-	sm.On("SetStep", dir, "Removing stale chunks").Return()
-	// Delete returns an error → SetFailed is called; saveHashes/SetIndexed are NOT called.
-	mc.On("Delete", mock.Anything, collection, `relativePath == "deleted.go"`).Return(errors.New("delete failed")).Once()
+// Walker finds main.go → Diff: deleted.go is Deleted, main.go unchanged → changes=[{deleted.go,Deleted}]
+sm.On("IsIndexing", dir).Return(false)
+sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+expectRemoteCollectionExists(mc, dir)
+sm.On("SetStep", dir, "Starting incremental sync").Return()
+sm.On("SetStep", dir, "Walking files").Return()
+sm.On("SetStep", dir, "Computing file changes").Return()
+sm.On("SetStep", dir, "Removing stale chunks").Return()
+// Delete returns an error → SetFailed is called; saveHashes/SetIndexed are NOT called.
+mc.On("Delete", mock.Anything, collection, `relativePath == "deleted.go"`).Return(errors.New("delete failed")).Once()
 
-	done := make(chan struct{})
+done := make(chan struct{})
 
-	sm.On("SetFailed", dir, mock.MatchedBy(func(msg string) bool {
-		return strings.HasPrefix(msg, "incremental index: delete failed: delete chunks for deleted.go: ") && strings.Contains(msg, "delete failed")
-	})).
-		Run(func(args mock.Arguments) { close(done) }).Return()
+sm.On("SetFailed", dir, mock.MatchedBy(func(msg string) bool {
+return strings.HasPrefix(msg, "incremental index: delete failed: delete chunks for deleted.go: ") && strings.Contains(msg, "delete failed")
+})).
+Run(func(args mock.Arguments) { close(done) }).Return()
 
-	res, err := h.HandleIndex(context.Background(), makeReq(map[string]any{
-		"path":  dir,
-		"async": true,
-	}))
-	require.NoError(t, err)
-	assert.False(t, res.IsError)
+res, err := h.HandleIndex(context.Background(), makeReq(map[string]any{
+"path":  dir,
+"async": true,
+}))
+require.NoError(t, err)
+assert.False(t, res.IsError)
 
-	waitForDone(t, done, 5*time.Second)
+waitForDone(t, done, 5*time.Second)
 }
 
 // ─── walkFiles error: backgroundIndex and incrementalIndex ───────────────────
 
 func TestHandleIndex_BackgroundIndex_WalkFilesError(t *testing.T) {
-	if os.Getuid() == 0 {
-		t.Skip("skipping permission test: running as root bypasses chmod")
-	}
+if os.Getuid() == 0 {
+t.Skip("skipping permission test: running as root bypasses chmod")
+}
 
-	mc := mocks.NewMockVectorClient(t)
-	sm := mocks.NewMockStatusManager(t)
-	sp := mocks.NewMockSplitter(t)
-	h := newTestHandler(t, mc, sm, sp, nil)
+mc := mocks.NewMockVectorClient(t)
+sm := mocks.NewMockStatusManager(t)
+sp := mocks.NewMockSplitter(t)
+h := newTestHandler(t, mc, sm, sp, nil)
 
-	dir := t.TempDir()
-	collection := snapshot.CollectionName(dir)
+dir := t.TempDir()
+collection := snapshot.CollectionName(dir)
 
-	// Create an unreadable subdirectory so filepath.WalkDir returns an error
-	restricted := filepath.Join(dir, "restricted")
-	require.NoError(t, os.Mkdir(restricted, 0o000))
-	t.Cleanup(func() { os.Chmod(restricted, 0o700) })
+// Create an unreadable subdirectory so filepath.WalkDir returns an error
+restricted := filepath.Join(dir, "restricted")
+require.NoError(t, os.Mkdir(restricted, 0o000))
+t.Cleanup(func() { os.Chmod(restricted, 0o700) })
 
-	sm.On("IsIndexing", dir).Return(false)
-	sm.On("GetStatus", dir).Return(snapshot.StatusNotFound)
-	mc.On("CreateCollection", mock.Anything, collection, h.cfg.EmbeddingDimension, true).Return(nil)
-	sm.On("SetStep", dir, "Starting").Return()
-	sm.On("SetStep", dir, "Walking files").Return()
+sm.On("IsIndexing", dir).Return(false)
+sm.On("GetStatus", dir).Return(snapshot.StatusNotFound)
+mc.On("CreateCollection", mock.Anything, collection, h.cfg.EmbeddingDimension, true).Return(nil)
+sm.On("SetStep", dir, "Starting").Return()
+sm.On("SetStep", dir, "Walking files").Return()
 
-	done := make(chan struct{})
+done := make(chan struct{})
 
-	sm.On("SetFailed", dir, mock.AnythingOfType("string")).Run(func(args mock.Arguments) { close(done) }).Return()
+sm.On("SetFailed", dir, mock.AnythingOfType("string")).Run(func(args mock.Arguments) { close(done) }).Return()
 
-	res, err := h.HandleIndex(context.Background(), makeReq(map[string]any{
-		"path":  dir,
-		"async": true,
-	}))
-	require.NoError(t, err)
-	assert.False(t, res.IsError)
+res, err := h.HandleIndex(context.Background(), makeReq(map[string]any{
+"path":  dir,
+"async": true,
+}))
+require.NoError(t, err)
+assert.False(t, res.IsError)
 
-	waitForDone(t, done, 5*time.Second)
+waitForDone(t, done, 5*time.Second)
 }
 
 func TestHandleIndex_IncrementalIndex_WalkFilesError(t *testing.T) {
-	if os.Getuid() == 0 {
-		t.Skip("skipping permission test: running as root bypasses chmod")
-	}
+if os.Getuid() == 0 {
+t.Skip("skipping permission test: running as root bypasses chmod")
+}
 
-	mc := mocks.NewMockVectorClient(t)
-	sm := mocks.NewMockStatusManager(t)
-	sp := mocks.NewMockSplitter(t)
-	h := newTestHandler(t, mc, sm, sp, nil)
+mc := mocks.NewMockVectorClient(t)
+sm := mocks.NewMockStatusManager(t)
+sp := mocks.NewMockSplitter(t)
+h := newTestHandler(t, mc, sm, sp, nil)
 
-	dir := t.TempDir()
+dir := t.TempDir()
 
-	restricted := filepath.Join(dir, "restricted")
-	require.NoError(t, os.Mkdir(restricted, 0o000))
-	t.Cleanup(func() { os.Chmod(restricted, 0o700) })
+restricted := filepath.Join(dir, "restricted")
+require.NoError(t, os.Mkdir(restricted, 0o000))
+t.Cleanup(func() { os.Chmod(restricted, 0o700) })
 
-	sm.On("IsIndexing", dir).Return(false)
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
-	expectRemoteCollectionExists(mc, dir)
-	sm.On("SetStep", dir, "Starting incremental sync").Return()
-	sm.On("SetStep", dir, "Walking files").Return()
+sm.On("IsIndexing", dir).Return(false)
+sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+expectRemoteCollectionExists(mc, dir)
+sm.On("SetStep", dir, "Starting incremental sync").Return()
+sm.On("SetStep", dir, "Walking files").Return()
 
-	done := make(chan struct{})
+done := make(chan struct{})
 
-	sm.On("SetFailed", dir, mock.AnythingOfType("string")).Run(func(args mock.Arguments) { close(done) }).Return()
+sm.On("SetFailed", dir, mock.AnythingOfType("string")).Run(func(args mock.Arguments) { close(done) }).Return()
 
-	res, err := h.HandleIndex(context.Background(), makeReq(map[string]any{
-		"path":  dir,
-		"async": true,
-	}))
-	require.NoError(t, err)
-	assert.False(t, res.IsError)
+res, err := h.HandleIndex(context.Background(), makeReq(map[string]any{
+"path":  dir,
+"async": true,
+}))
+require.NoError(t, err)
+assert.False(t, res.IsError)
 
-	waitForDone(t, done, 5*time.Second)
+waitForDone(t, done, 5*time.Second)
 }
 
 func TestHandleIndex_BackgroundIndex_LockFails(t *testing.T) {
-	// Covers the AcquireLock error branch in backgroundIndex.
-	mc := mocks.NewMockVectorClient(t)
-	sm := mocks.NewMockStatusManager(t)
-	sp := mocks.NewMockSplitter(t)
-	h := newTestHandler(t, mc, sm, sp, nil)
+// Covers the AcquireLock error branch in backgroundIndex.
+mc := mocks.NewMockVectorClient(t)
+sm := mocks.NewMockStatusManager(t)
+sp := mocks.NewMockSplitter(t)
+h := newTestHandler(t, mc, sm, sp, nil)
 
-	dir := t.TempDir()
-	collection := snapshot.CollectionName(dir)
+dir := t.TempDir()
+collection := snapshot.CollectionName(dir)
 
-	// Write a fresh lock file for the current process — AcquireLock will see it and fail.
-	writeLockForCurrentProcess(t, dir)
+// Write a fresh lock file for the current process — AcquireLock will see it and fail.
+writeLockForCurrentProcess(t, dir)
 
-	sm.On("IsIndexing", dir).Return(false)
-	sm.On("GetStatus", dir).Return(snapshot.StatusNotFound)
-	mc.On("CreateCollection", mock.Anything, collection, h.cfg.EmbeddingDimension, true).Return(nil)
-	sm.On("SetStep", dir, "Starting").Return()
+sm.On("IsIndexing", dir).Return(false)
+sm.On("GetStatus", dir).Return(snapshot.StatusNotFound)
+mc.On("CreateCollection", mock.Anything, collection, h.cfg.EmbeddingDimension, true).Return(nil)
+sm.On("SetStep", dir, "Starting").Return()
 
-	done := make(chan struct{})
+done := make(chan struct{})
 
-	sm.On("SetFailed", dir, mock.MatchedBy(func(s string) bool {
-		return strings.HasPrefix(s, "lock:")
-	})).Run(func(args mock.Arguments) { close(done) }).Return()
+sm.On("SetFailed", dir, mock.MatchedBy(func(s string) bool {
+return strings.HasPrefix(s, "lock:")
+})).Run(func(args mock.Arguments) { close(done) }).Return()
 
-	res, err := h.HandleIndex(context.Background(), makeReq(map[string]any{
-		"path":  dir,
-		"async": true,
-	}))
-	require.NoError(t, err)
-	assert.False(t, res.IsError) // handler returns OK; goroutine fails internally
+res, err := h.HandleIndex(context.Background(), makeReq(map[string]any{
+"path":  dir,
+"async": true,
+}))
+require.NoError(t, err)
+assert.False(t, res.IsError) // handler returns OK; goroutine fails internally
 
-	waitForDone(t, done, 5*time.Second)
+waitForDone(t, done, 5*time.Second)
 }
 
 func TestHandleIndex_IncrementalIndex_LockFails(t *testing.T) {
-	// Covers the AcquireLock error branch in incrementalIndex.
-	mc := mocks.NewMockVectorClient(t)
-	sm := mocks.NewMockStatusManager(t)
-	sp := mocks.NewMockSplitter(t)
-	h := newTestHandler(t, mc, sm, sp, nil)
+// Covers the AcquireLock error branch in incrementalIndex.
+mc := mocks.NewMockVectorClient(t)
+sm := mocks.NewMockStatusManager(t)
+sp := mocks.NewMockSplitter(t)
+h := newTestHandler(t, mc, sm, sp, nil)
 
-	dir := t.TempDir()
+dir := t.TempDir()
 
-	writeLockForCurrentProcess(t, dir)
+writeLockForCurrentProcess(t, dir)
 
-	sm.On("IsIndexing", dir).Return(false)
-	sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
-	expectRemoteCollectionExists(mc, dir)
-	sm.On("SetStep", dir, "Starting incremental sync").Return()
+sm.On("IsIndexing", dir).Return(false)
+sm.On("GetStatus", dir).Return(snapshot.StatusIndexed)
+expectRemoteCollectionExists(mc, dir)
+sm.On("SetStep", dir, "Starting incremental sync").Return()
 
-	done := make(chan struct{})
+done := make(chan struct{})
 
-	sm.On("SetFailed", dir, mock.MatchedBy(func(s string) bool {
-		return strings.HasPrefix(s, "lock:")
-	})).Run(func(args mock.Arguments) { close(done) }).Return()
+sm.On("SetFailed", dir, mock.MatchedBy(func(s string) bool {
+return strings.HasPrefix(s, "lock:")
+})).Run(func(args mock.Arguments) { close(done) }).Return()
 
-	res, err := h.HandleIndex(context.Background(), makeReq(map[string]any{
-		"path":  dir,
-		"async": true,
-	}))
-	require.NoError(t, err)
-	assert.False(t, res.IsError)
+res, err := h.HandleIndex(context.Background(), makeReq(map[string]any{
+"path":  dir,
+"async": true,
+}))
+require.NoError(t, err)
+assert.False(t, res.IsError)
 
-	waitForDone(t, done, 5*time.Second)
+waitForDone(t, done, 5*time.Second)
 }
 
 
@@ -4481,168 +4509,168 @@ Symbol: TestIncrementalIndex_SavesPartialOnFailure (function, lines 3706-3805)
 // TestBackgroundIndex_SavesPartialOnFailure verifies that when backgroundIndex
 // encounters an insert error and some files completed, a partial hash file is saved.
 func TestBackgroundIndex_SavesPartialOnFailure(t *testing.T) {
-	t.Setenv("INSERT_BATCH_SIZE", "1") // each chunk is its own batch
-	t.Setenv("INDEX_CONCURRENCY", "1") // deterministic file ordering
+t.Setenv("INSERT_BATCH_SIZE", "1") // each chunk is its own batch
+t.Setenv("INDEX_CONCURRENCY", "1") // deterministic file ordering
 
-	mc := mocks.NewMockVectorClient(t)
-	sm := mocks.NewMockStatusManager(t)
-	sp := mocks.NewMockSplitter(t)
-	h := newTestHandler(t, mc, sm, sp, nil)
+mc := mocks.NewMockVectorClient(t)
+sm := mocks.NewMockStatusManager(t)
+sp := mocks.NewMockSplitter(t)
+h := newTestHandler(t, mc, sm, sp, nil)
 
-	dir := t.TempDir()
-	collection := snapshot.CollectionName(dir)
+dir := t.TempDir()
+collection := snapshot.CollectionName(dir)
 
-	// Two files: first insert (for whichever file is processed first) succeeds, second fails.
-	fileA := filepath.Join(dir, "a.go")
-	fileB := filepath.Join(dir, "b.go")
+// Two files: first insert (for whichever file is processed first) succeeds, second fails.
+fileA := filepath.Join(dir, "a.go")
+fileB := filepath.Join(dir, "b.go")
 
-	require.NoError(t, os.WriteFile(fileA, []byte("package a\n"), 0o644))
-	require.NoError(t, os.WriteFile(fileB, []byte("package b\n"), 0o644))
+require.NoError(t, os.WriteFile(fileA, []byte("package a\n"), 0o644))
+require.NoError(t, os.WriteFile(fileB, []byte("package b\n"), 0o644))
 
-	sm.On("IsIndexing", dir).Return(false)
-	sm.On("GetStatus", dir).Return(snapshot.StatusNotFound)
-	mc.On("CreateCollection", mock.Anything, collection, h.cfg.EmbeddingDimension, true).Return(nil)
-	sm.On("SetStep", dir, "Starting").Return()
-	sm.On("SetStep", dir, "Walking files").Return()
-	sm.On("SetStep", dir, "Indexing 2 files").Return()
-	sm.On("SetProgress", mock.Anything, mock.Anything).Maybe()
+sm.On("IsIndexing", dir).Return(false)
+sm.On("GetStatus", dir).Return(snapshot.StatusNotFound)
+mc.On("CreateCollection", mock.Anything, collection, h.cfg.EmbeddingDimension, true).Return(nil)
+sm.On("SetStep", dir, "Starting").Return()
+sm.On("SetStep", dir, "Walking files").Return()
+sm.On("SetStep", dir, "Indexing 2 files").Return()
+sm.On("SetProgress", mock.Anything, mock.Anything).Maybe()
 
-	chunk := splitter.Chunk{Content: "package", StartLine: 1, EndLine: 1}
-	expectSplitChunks(t, sp, mock.Anything, []splitter.Chunk{chunk})
+chunk := splitter.Chunk{Content: "package", StartLine: 1, EndLine: 1}
+expectSplitChunks(t, sp, mock.Anything, []splitter.Chunk{chunk})
 
-	mc.On("Insert", mock.Anything, collection, mock.Anything).Return(&milvus.InsertResult{InsertCount: 1}, nil).Once()
-	mc.On("Insert", mock.Anything, collection, mock.Anything).Return(nil, errors.New("quota exceeded")).Once()
+mc.On("Insert", mock.Anything, collection, mock.Anything).Return(&milvus.InsertResult{InsertCount: 1}, nil).Once()
+mc.On("Insert", mock.Anything, collection, mock.Anything).Return(nil, errors.New("quota exceeded")).Once()
 
-	done := make(chan struct{})
+done := make(chan struct{})
 
-	sm.On("SetFailed", dir, mock.MatchedBy(func(s string) bool {
-		return strings.HasPrefix(s, "insert failed:")
-	})).Run(func(args mock.Arguments) { close(done) }).Return()
+sm.On("SetFailed", dir, mock.MatchedBy(func(s string) bool {
+return strings.HasPrefix(s, "insert failed:")
+})).Run(func(args mock.Arguments) { close(done) }).Return()
 
-	res, err := h.HandleIndex(context.Background(), makeReq(map[string]any{
-		"path":  dir,
-		"async": true,
-	}))
-	require.NoError(t, err)
-	assert.False(t, res.IsError)
+res, err := h.HandleIndex(context.Background(), makeReq(map[string]any{
+"path":  dir,
+"async": true,
+}))
+require.NoError(t, err)
+assert.False(t, res.IsError)
 
-	waitForDone(t, done, 5*time.Second)
+waitForDone(t, done, 5*time.Second)
 
-	// Partial hash file should exist with exactly 1 completed file.
-	hashFile := filesync.HashFilePath(dir)
+// Partial hash file should exist with exactly 1 completed file.
+hashFile := filesync.HashFilePath(dir)
 
-	require.Eventually(t, func() bool {
-		_, err := os.Stat(hashFile)
-		return err == nil
-	}, 5*time.Second, 5*time.Millisecond, "hash file should exist after partial backgroundIndex failure")
+require.Eventually(t, func() bool {
+_, err := os.Stat(hashFile)
+return err == nil
+}, 5*time.Second, 5*time.Millisecond, "hash file should exist after partial backgroundIndex failure")
 
-	loaded, err := filesync.LoadFileHashMap(hashFile)
-	require.NoError(t, err)
-	assert.Len(t, loaded.Files, 1, "only completed file should be in hash map")
+loaded, err := filesync.LoadFileHashMap(hashFile)
+require.NoError(t, err)
+assert.Len(t, loaded.Files, 1, "only completed file should be in hash map")
 }
 
 // TestIncrementalIndex_SavesPartialOnFailure verifies that on insert failure during
 // incrementalIndex, partial progress is saved: old unchanged files + completed new
 // files are persisted, minus deleted/modified files.
 func TestIncrementalIndex_SavesPartialOnFailure(t *testing.T) {
-	t.Setenv("INSERT_BATCH_SIZE", "1")
-	t.Setenv("INDEX_CONCURRENCY", "1")
+t.Setenv("INSERT_BATCH_SIZE", "1")
+t.Setenv("INDEX_CONCURRENCY", "1")
 
-	mc := mocks.NewMockVectorClient(t)
-	sm := mocks.NewMockStatusManager(t)
-	sp := mocks.NewMockSplitter(t)
-	h := newTestHandler(t, mc, sm, sp, nil)
+mc := mocks.NewMockVectorClient(t)
+sm := mocks.NewMockStatusManager(t)
+sp := mocks.NewMockSplitter(t)
+h := newTestHandler(t, mc, sm, sp, nil)
 
-	dir := t.TempDir()
-	collection := snapshot.CollectionName(dir)
+dir := t.TempDir()
+collection := snapshot.CollectionName(dir)
 
-	// "old.go" is unchanged (same hash in old hashes → carried forward on partial save).
-	oldFile := filepath.Join(dir, "old.go")
-	require.NoError(t, os.WriteFile(oldFile, []byte("package old\n"), 0o644))
+// "old.go" is unchanged (same hash in old hashes → carried forward on partial save).
+oldFile := filepath.Join(dir, "old.go")
+require.NoError(t, os.WriteFile(oldFile, []byte("package old\n"), 0o644))
 
-	// "modified.go" exists on disk but has a stale old hash entry, so incrementalIndex
-	// treats it as Modified and must remove the old entry from progressHashes before
-	// any partial save occurs.
-	modifiedFile := filepath.Join(dir, "modified.go")
-	require.NoError(t, os.WriteFile(modifiedFile, []byte("package modified\n"), 0o644))
+// "modified.go" exists on disk but has a stale old hash entry, so incrementalIndex
+// treats it as Modified and must remove the old entry from progressHashes before
+// any partial save occurs.
+modifiedFile := filepath.Join(dir, "modified.go")
+require.NoError(t, os.WriteFile(modifiedFile, []byte("package modified\n"), 0o644))
 
-	// Compute the real hash for old.go to store in the old hash file.
-	oldFileList := []walker.CodeFile{{AbsPath: oldFile, RelPath: "old.go", Extension: ".go"}}
-	computedHashes, err := filesync.ComputeFileHashMap(oldFileList)
-	require.NoError(t, err)
+// Compute the real hash for old.go to store in the old hash file.
+oldFileList := []walker.CodeFile{{AbsPath: oldFile, RelPath: "old.go", Extension: ".go"}}
+computedHashes, err := filesync.ComputeFileHashMap(oldFileList)
+require.NoError(t, err)
 
-	oldHashes := filesync.NewFileHashMap()
-	oldHashes.Files["old.go"] = filesync.FileEntry{Hash: computedHashes.Files["old.go"].Hash, ChunkCount: 5}
-	oldHashes.Files["modified.go"] = filesync.FileEntry{Hash: "deadbeef", ChunkCount: 7}
-	oldHashes.Files["deleted.go"] = filesync.FileEntry{Hash: "cafebabe", ChunkCount: 11}
-	require.NoError(t, oldHashes.Save(filesync.HashFilePath(dir)))
+oldHashes := filesync.NewFileHashMap()
+oldHashes.Files["old.go"] = filesync.FileEntry{Hash: computedHashes.Files["old.go"].Hash, ChunkCount: 5}
+oldHashes.Files["modified.go"] = filesync.FileEntry{Hash: "deadbeef", ChunkCount: 7}
+oldHashes.Files["deleted.go"] = filesync.FileEntry{Hash: "cafebabe", ChunkCount: 11}
+require.NoError(t, oldHashes.Save(filesync.HashFilePath(dir)))
 
-	// "a.go" and "b.go" are new (not in oldHashes → Added).
-	fileA := filepath.Join(dir, "a.go")
-	fileB := filepath.Join(dir, "b.go")
+// "a.go" and "b.go" are new (not in oldHashes → Added).
+fileA := filepath.Join(dir, "a.go")
+fileB := filepath.Join(dir, "b.go")
 
-	require.NoError(t, os.WriteFile(fileA, []byte("package a\n"), 0o644))
-	require.NoError(t, os.WriteFile(fileB, []byte("package b\n"), 0o644))
+require.NoError(t, os.WriteFile(fileA, []byte("package a\n"), 0o644))
+require.NoError(t, os.WriteFile(fileB, []byte("package b\n"), 0o644))
 
-	sm.On("IsIndexing", dir).Return(false)
-	sm.On("GetStatus", dir).Return(snapshot.StatusFailed) // routes to incremental
-	expectRemoteCollectionExists(mc, dir)
-	sm.On("SetStep", dir, "Starting incremental sync").Return()
-	sm.On("SetStep", dir, "Walking files").Return()
-	sm.On("SetStep", dir, "Computing file changes").Return()
-	sm.On("SetStep", dir, "Removing stale chunks").Return()
-	sm.On("SetStep", dir, mock.MatchedBy(func(s string) bool {
-		return strings.HasPrefix(s, "Indexing 3 changed files")
-	})).Return()
-	sm.On("SetProgress", mock.Anything, mock.Anything).Maybe()
-	mc.On("Delete", mock.Anything, collection, `relativePath == "deleted.go"`).Return(nil).Once()
-	mc.On("Query", mock.Anything, collection, `relativePath == "modified.go"`, 7).Return([]milvus.Entity{{ID: "chunk-old"}}, nil).Once()
+sm.On("IsIndexing", dir).Return(false)
+sm.On("GetStatus", dir).Return(snapshot.StatusFailed) // routes to incremental
+expectRemoteCollectionExists(mc, dir)
+sm.On("SetStep", dir, "Starting incremental sync").Return()
+sm.On("SetStep", dir, "Walking files").Return()
+sm.On("SetStep", dir, "Computing file changes").Return()
+sm.On("SetStep", dir, "Removing stale chunks").Return()
+sm.On("SetStep", dir, mock.MatchedBy(func(s string) bool {
+return strings.HasPrefix(s, "Indexing 3 changed files")
+})).Return()
+sm.On("SetProgress", mock.Anything, mock.Anything).Maybe()
+mc.On("Delete", mock.Anything, collection, `relativePath == "deleted.go"`).Return(nil).Once()
+mc.On("Query", mock.Anything, collection, `relativePath == "modified.go"`, 7).Return([]milvus.Entity{{ID: "chunk-old"}}, nil).Once()
 
-	chunk := splitter.Chunk{Content: "package", StartLine: 1, EndLine: 1}
-	expectSplitChunks(t, sp, "a.go", []splitter.Chunk{chunk})
-	expectSplitChunks(t, sp, "b.go", []splitter.Chunk{chunk})
-	sp.On("Split", mock.Anything, "modified.go", mock.Anything).Return(nil).Maybe()
+chunk := splitter.Chunk{Content: "package", StartLine: 1, EndLine: 1}
+expectSplitChunks(t, sp, "a.go", []splitter.Chunk{chunk})
+expectSplitChunks(t, sp, "b.go", []splitter.Chunk{chunk})
+sp.On("Split", mock.Anything, "modified.go", mock.Anything).Return(nil).Maybe()
 
-	// First insert succeeds, second fails.
-	mc.On("Insert", mock.Anything, collection, singleFileInsert("a.go")).
-		Return(&milvus.InsertResult{InsertCount: 1}, nil).Once()
-	mc.On("Insert", mock.Anything, collection, singleFileInsert("b.go")).
-		Return(nil, errors.New("quota exceeded")).Once()
+// First insert succeeds, second fails.
+mc.On("Insert", mock.Anything, collection, singleFileInsert("a.go")).
+Return(&milvus.InsertResult{InsertCount: 1}, nil).Once()
+mc.On("Insert", mock.Anything, collection, singleFileInsert("b.go")).
+Return(nil, errors.New("quota exceeded")).Once()
 
-	done := make(chan struct{})
+done := make(chan struct{})
 
-	sm.On("SetFailed", dir, mock.MatchedBy(func(s string) bool {
-		return strings.HasPrefix(s, "insert failed:")
-	})).Run(func(args mock.Arguments) { close(done) }).Return()
+sm.On("SetFailed", dir, mock.MatchedBy(func(s string) bool {
+return strings.HasPrefix(s, "insert failed:")
+})).Run(func(args mock.Arguments) { close(done) }).Return()
 
-	res, err := h.HandleIndex(context.Background(), makeReq(map[string]any{
-		"path":  dir,
-		"async": true,
-	}))
-	require.NoError(t, err)
-	assert.False(t, res.IsError)
+res, err := h.HandleIndex(context.Background(), makeReq(map[string]any{
+"path":  dir,
+"async": true,
+}))
+require.NoError(t, err)
+assert.False(t, res.IsError)
 
-	waitForDone(t, done, 5*time.Second)
+waitForDone(t, done, 5*time.Second)
 
-	// Hash file should contain: old.go (unchanged, carried forward) + a.go.
-	// deleted.go and modified.go must be removed from the partial save seed.
-	hashFile := filesync.HashFilePath(dir)
+// Hash file should contain: old.go (unchanged, carried forward) + a.go.
+// deleted.go and modified.go must be removed from the partial save seed.
+hashFile := filesync.HashFilePath(dir)
 
-	require.Eventually(t, func() bool {
-		_, statErr := os.Stat(hashFile)
-		return statErr == nil
-	}, 5*time.Second, 5*time.Millisecond, "hash file should be updated after partial incrementalIndex failure")
+require.Eventually(t, func() bool {
+_, statErr := os.Stat(hashFile)
+return statErr == nil
+}, 5*time.Second, 5*time.Millisecond, "hash file should be updated after partial incrementalIndex failure")
 
-	loaded, err := filesync.LoadFileHashMap(hashFile)
-	require.NoError(t, err)
+loaded, err := filesync.LoadFileHashMap(hashFile)
+require.NoError(t, err)
 
-	_, hasOld := loaded.Files["old.go"]
-	assert.True(t, hasOld, "unchanged old.go must be carried forward into partial hash file")
-	assert.Contains(t, loaded.Files, "a.go")
-	assert.NotContains(t, loaded.Files, "b.go")
-	assert.NotContains(t, loaded.Files, "deleted.go")
-	assert.NotContains(t, loaded.Files, "modified.go")
-	assert.Len(t, loaded.Files, 2, "hash file should have old.go + exactly one completed new file")
+_, hasOld := loaded.Files["old.go"]
+assert.True(t, hasOld, "unchanged old.go must be carried forward into partial hash file")
+assert.Contains(t, loaded.Files, "a.go")
+assert.NotContains(t, loaded.Files, "b.go")
+assert.NotContains(t, loaded.Files, "deleted.go")
+assert.NotContains(t, loaded.Files, "modified.go")
+assert.Len(t, loaded.Files, 2, "hash file should have old.go + exactly one completed new file")
 }
 
 
@@ -4857,77 +4885,77 @@ func sleepWithJitter(ctx context.Context, base time.Duration) error {
 Symbol: TestHandleIndex_FreshIndex_ExplicitSyncIsIgnoredEvenWhenIndexLaterFails (function, lines 596-648)
 ```go
 func TestHandleIndex_FreshIndex_AsyncIgnoresRequestCancellation(t *testing.T) {
-	mc := mocks.NewMockVectorClient(t)
-	sp := mocks.NewMockSplitter(t)
-	sm := mocks.NewMockStatusManager(t)
-	cfg := loadTestConfig(t)
-	h := New(mc, sm, cfg, sp, nil)
+mc := mocks.NewMockVectorClient(t)
+sp := mocks.NewMockSplitter(t)
+sm := mocks.NewMockStatusManager(t)
+cfg := loadTestConfig(t)
+h := New(mc, sm, cfg, sp, nil)
 
-	dir := t.TempDir()
-	collection := snapshot.CollectionName(dir)
-	goFile := filepath.Join(dir, "main.go")
-	require.NoError(t, os.WriteFile(goFile, []byte("package main\n"), 0o644))
+dir := t.TempDir()
+collection := snapshot.CollectionName(dir)
+goFile := filepath.Join(dir, "main.go")
+require.NoError(t, os.WriteFile(goFile, []byte("package main\n"), 0o644))
 
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
+ctx, cancel := context.WithCancel(context.Background())
+t.Cleanup(cancel)
 
-	sm.On("IsIndexing", dir).Return(false)
-	sm.On("GetStatus", dir).Return(snapshot.StatusNotFound)
-	mc.On("CreateCollection", mock.Anything, collection, cfg.EmbeddingDimension, true).Return(nil).Once()
-	expectSplitChunks(t, sp, "main.go", []splitter.Chunk{{Content: "package main", StartLine: 1, EndLine: 1}})
+sm.On("IsIndexing", dir).Return(false)
+sm.On("GetStatus", dir).Return(snapshot.StatusNotFound)
+mc.On("CreateCollection", mock.Anything, collection, cfg.EmbeddingDimension, true).Return(nil).Once()
+expectSplitChunks(t, sp, "main.go", []splitter.Chunk{{Content: "package main", StartLine: 1, EndLine: 1}})
 
-	insertStarted := make(chan struct{})
-	insertMayFinish := make(chan struct{})
-	insertCanceled := make(chan struct{})
+insertStarted := make(chan struct{})
+insertMayFinish := make(chan struct{})
+insertCanceled := make(chan struct{})
 
-	mc.On("Insert", mock.Anything, collection, singleFileInsert("main.go")).Run(func(args mock.Arguments) {
-		ctx, ok := args.Get(0).(context.Context)
-		require.True(t, ok)
+mc.On("Insert", mock.Anything, collection, singleFileInsert("main.go")).Run(func(args mock.Arguments) {
+ctx, ok := args.Get(0).(context.Context)
+require.True(t, ok)
 
-		close(insertStarted)
+close(insertStarted)
 
-		select {
-		case <-ctx.Done():
-			close(insertCanceled)
-		case <-insertMayFinish:
-		}
-	}).Return(&milvus.InsertResult{InsertCount: 1}, nil).Once()
+select {
+case <-ctx.Done():
+close(insertCanceled)
+case <-insertMayFinish:
+}
+}).Return(&milvus.InsertResult{InsertCount: 1}, nil).Once()
 
-	sm.On("SetStep", dir, "Starting").Return()
-	sm.On("SetStep", dir, "Walking files").Return()
-	sm.On("SetStep", dir, "Indexing 1 files").Return()
-	sm.On("SetProgress", mock.Anything, mock.Anything).Maybe()
+sm.On("SetStep", dir, "Starting").Return()
+sm.On("SetStep", dir, "Walking files").Return()
+sm.On("SetStep", dir, "Indexing 1 files").Return()
+sm.On("SetProgress", mock.Anything, mock.Anything).Maybe()
 
-	done := make(chan struct{})
+done := make(chan struct{})
 
-	sm.On("SetIndexed", dir, 1, 1).Run(func(args mock.Arguments) { close(done) }).Return()
+sm.On("SetIndexed", dir, 1, 1).Run(func(args mock.Arguments) { close(done) }).Return()
 
-	res, err := h.HandleIndex(ctx, makeReq(map[string]any{
-		"path": dir,
-	}))
-	require.NoError(t, err)
-	assert.False(t, res.IsError)
-	assert.Contains(t, resultText(t, res), "Indexing started")
+res, err := h.HandleIndex(ctx, makeReq(map[string]any{
+"path": dir,
+}))
+require.NoError(t, err)
+assert.False(t, res.IsError)
+assert.Contains(t, resultText(t, res), "Indexing started")
 
-	waitForDone(t, insertStarted, 5*time.Second)
-	cancel()
+waitForDone(t, insertStarted, 5*time.Second)
+cancel()
 
-	select {
-	case <-insertCanceled:
-		t.Fatal("async full indexing inherited request cancellation")
-	case <-time.After(100 * time.Millisecond):
-	}
+select {
+case <-insertCanceled:
+t.Fatal("async full indexing inherited request cancellation")
+case <-time.After(100 * time.Millisecond):
+}
 
-	close(insertMayFinish)
-	waitForDone(t, done, 5*time.Second)
+close(insertMayFinish)
+waitForDone(t, done, 5*time.Second)
 
-	require.Eventually(t, func() bool {
-		_, err := os.Stat(snapshot.LockFilePath(dir))
-		return os.IsNotExist(err)
-	}, 5*time.Second, 5*time.Millisecond)
+require.Eventually(t, func() bool {
+_, err := os.Stat(snapshot.LockFilePath(dir))
+return os.IsNotExist(err)
+}, 5*time.Second, 5*time.Millisecond)
 
-	requireIndexSemaphoreReleased(t, h)
-	requireNoIndexLock(t, dir)
+requireIndexSemaphoreReleased(t, h)
+requireNoIndexLock(t, dir)
 }
 
 
@@ -8322,138 +8350,138 @@ Symbol: run (function, lines 38-122)
 package main
 
 import (
-	"cfmantic-code/internal/config"
-	"cfmantic-code/internal/handler"
-	"cfmantic-code/internal/milvus"
-	"cfmantic-code/internal/snapshot"
-	"cfmantic-code/internal/splitter"
-	"cfmantic-code/internal/visibility"
-	"fmt"
-	"log"
-	"os"
-	"os/signal"
-	"syscall"
+  "cfmantic-code/internal/config"
+  "cfmantic-code/internal/handler"
+  "cfmantic-code/internal/milvus"
+  "cfmantic-code/internal/snapshot"
+  "cfmantic-code/internal/splitter"
+  "cfmantic-code/internal/visibility"
+  "fmt"
+  "log"
+  "os"
+  "os/signal"
+  "syscall"
 
-	mcpserver "cfmantic-code/internal/server"
+  mcpserver "cfmantic-code/internal/server"
 
-	filesync "cfmantic-code/internal/sync"
+  filesync "cfmantic-code/internal/sync"
 
-	"github.com/mark3labs/mcp-go/server"
+  "github.com/mark3labs/mcp-go/server"
 )
 
 var (
-	loadConfig       = config.Load
-	serveStdio       = server.ServeStdio
-	startSyncManager = func(syncMgr *filesync.Manager) {
-		syncMgr.Start()
-	}
-	stopSyncManager = func(syncMgr *filesync.Manager) {
-		syncMgr.Stop()
-	}
+  loadConfig       = config.Load
+  serveStdio       = server.ServeStdio
+  startSyncManager = func(syncMgr *filesync.Manager) {
+    syncMgr.Start()
+  }
+  stopSyncManager = func(syncMgr *filesync.Manager) {
+    syncMgr.Stop()
+  }
 )
 
 func main() {
-	os.Exit(run())
+  os.Exit(run())
 }
 
 func run() int {
-	log.SetOutput(os.Stderr)
+  log.SetOutput(os.Stderr)
 
-	cfg, err := loadConfig()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Configuration error: %v\n", err)
-		return 1
-	}
+  cfg, err := loadConfig()
+  if err != nil {
+    fmt.Fprintf(os.Stderr, "Configuration error: %v\n", err)
+    return 1
+  }
 
-	var sp splitter.Splitter
-	if cfg.SplitterType == "ast" {
-		sp = splitter.NewASTSplitter(cfg.ChunkSize, cfg.ChunkOverlap)
-	} else {
-		sp = splitter.NewTextSplitter(cfg.ChunkSize, cfg.ChunkOverlap)
-	}
+  var sp splitter.Splitter
+  if cfg.SplitterType == "ast" {
+    sp = splitter.NewASTSplitter(cfg.ChunkSize, cfg.ChunkOverlap)
+  } else {
+    sp = splitter.NewTextSplitter(cfg.ChunkSize, cfg.ChunkOverlap)
+  }
 
-	mc := milvus.NewClient(cfg.WorkerURL, cfg.AuthToken)
-	mc.SetRerankStrategy(cfg.RerankStrategy)
+  mc := milvus.NewClient(cfg.WorkerURL, cfg.AuthToken)
+  mc.SetRerankStrategy(cfg.RerankStrategy)
 
-	sm := snapshot.NewManager()
+  sm := snapshot.NewManager()
 
-	var syncMgr *filesync.Manager
-	if cfg.SyncInterval > 0 {
-		syncMgr = filesync.NewManager(mc, sm, sp, cfg, cfg.SyncInterval)
-	}
+  var syncMgr *filesync.Manager
+  if cfg.SyncInterval > 0 {
+    syncMgr = filesync.NewManager(mc, sm, sp, cfg, cfg.SyncInterval)
+  }
 
-	h := handler.New(mc, sm, cfg, sp, syncMgr)
-	s := mcpserver.New(cfg, h)
-	desktopClient := visibility.BeeepClient{}
-	sm.AddObserver(visibility.NewNotifier(
-		log.Printf,
-		visibility.NewMCPSink(visibility.NewMCPPublisher(s)),
-		visibility.NewDesktopSink(cfg.DesktopNotifications, desktopClient, visibility.DesktopAvailable),
-	))
+  h := handler.New(mc, sm, cfg, sp, syncMgr)
+  s := mcpserver.New(cfg, h)
+  desktopClient := visibility.BeeepClient{}
+  sm.AddObserver(visibility.NewNotifier(
+    log.Printf,
+    visibility.NewMCPSink(visibility.NewMCPPublisher(s)),
+    visibility.NewDesktopSink(cfg.DesktopNotifications, desktopClient, visibility.DesktopAvailable),
+  ))
 
-	log.Printf("Starting %s v%s", cfg.ServerName, cfg.ServerVersion)
+  log.Printf("Starting %s v%s", cfg.ServerName, cfg.ServerVersion)
 
-	if syncMgr != nil {
-		syncMgr.AutoTrackWorkingDirectory(handler.CanonicalizePath)
-		startSyncManager(syncMgr)
-		log.Printf("Background sync enabled (interval: %ds)", cfg.SyncInterval)
-	}
+  if syncMgr != nil {
+    syncMgr.AutoTrackWorkingDirectory(handler.CanonicalizePath)
+    startSyncManager(syncMgr)
+    log.Printf("Background sync enabled (interval: %ds)", cfg.SyncInterval)
+  }
 
-	// Set up signal handling
-	sigCh := make(chan os.Signal, 1)
+  // Set up signal handling
+  sigCh := make(chan os.Signal, 1)
 
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(sigCh)
+  signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+  defer signal.Stop(sigCh)
 
-	// Run MCP server in goroutine
-	errCh := make(chan error, 1)
+  // Run MCP server in goroutine
+  errCh := make(chan error, 1)
 
-	go func() {
-		errCh <- serveStdio(s)
-	}()
+  go func() {
+    errCh <- serveStdio(s)
+  }()
 
-	if err := visibility.NotifyDesktopStartup(cfg.DesktopNotifications, desktopClient, visibility.DesktopAvailable, visibility.StartupInfo{
-		WorkingDirectory: resolveStartupWorkingDirectory(handler.CanonicalizePath),
-		SyncEnabled:      syncMgr != nil,
-		SyncInterval:     cfg.SyncInterval,
-	}); err != nil {
-		log.Printf("visibility: %v", err)
-	}
+  if err := visibility.NotifyDesktopStartup(cfg.DesktopNotifications, desktopClient, visibility.DesktopAvailable, visibility.StartupInfo{
+    WorkingDirectory: resolveStartupWorkingDirectory(handler.CanonicalizePath),
+    SyncEnabled:      syncMgr != nil,
+    SyncInterval:     cfg.SyncInterval,
+  }); err != nil {
+    log.Printf("visibility: %v", err)
+  }
 
-	// Wait for signal or server error
-	exitCode := 0
+  // Wait for signal or server error
+  exitCode := 0
 
-	select {
-	case err := <-errCh:
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Server error: %v\n", err)
+  select {
+  case err := <-errCh:
+    if err != nil {
+      fmt.Fprintf(os.Stderr, "Server error: %v\n", err)
 
-			exitCode = 1
-		}
-	case sig := <-sigCh:
-		log.Printf("Received signal %v, shutting down", sig)
-	}
+      exitCode = 1
+    }
+  case sig := <-sigCh:
+    log.Printf("Received signal %v, shutting down", sig)
+  }
 
-	// Cleanup
-	if syncMgr != nil {
-		stopSyncManager(syncMgr)
-	}
+  // Cleanup
+  if syncMgr != nil {
+    stopSyncManager(syncMgr)
+  }
 
-	return exitCode
+  return exitCode
 }
 
 func resolveStartupWorkingDirectory(canonicalize func(string) (string, error)) string {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return ""
-	}
+  cwd, err := os.Getwd()
+  if err != nil {
+    return ""
+  }
 
-	path, err := canonicalize(cwd)
-	if err != nil {
-		return cwd
-	}
+  path, err := canonicalize(cwd)
+  if err != nil {
+    return cwd
+  }
 
-	return path
+  return path
 }
 
 ```

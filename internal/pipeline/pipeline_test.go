@@ -1,6 +1,7 @@
 package pipeline_test
 
 import (
+	"bytes"
 	"cfmantic-code/internal/milvus"
 	"cfmantic-code/internal/mocks"
 	"cfmantic-code/internal/pipeline"
@@ -10,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -443,9 +445,9 @@ func TestRun_OnResultsDrainedCalled(t *testing.T) {
 	assert.True(t, called)
 }
 
-// ─── Run: unreadable file fails the run ──────────────────────────────────────
+// ─── Run: missing file is skipped, run continues ─────────────────────────────
 
-func TestRun_UnreadableFileReturnsError(t *testing.T) {
+func TestRun_MissingFileSkippedRunContinues(t *testing.T) {
 	dir := t.TempDir()
 	mc := mocks.NewMockInserter(t)
 	sp := mocks.NewMockSplitter(t)
@@ -460,11 +462,10 @@ func TestRun_UnreadableFileReturnsError(t *testing.T) {
 			require.True(t, ok)
 			require.NoError(t, emit(splitter.Chunk{Content: "later", StartLine: 1, EndLine: 1}))
 		}).
-		Return(nil).
-		Maybe()
+		Return(nil)
 	mc.On("Insert", testifymock.Anything, "col", testifymock.Anything).
 		Return(&milvus.InsertResult{InsertCount: 1}, nil).
-		Maybe()
+		Once()
 
 	files := []walker.CodeFile{
 		{AbsPath: "/nonexistent/path/missing.go", RelPath: "missing.go", Extension: ".go"},
@@ -473,11 +474,59 @@ func TestRun_UnreadableFileReturnsError(t *testing.T) {
 	cfg := baseConfig("col", dir)
 	cfg.Concurrency = 1
 
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	result, err := pipeline.Run(context.Background(), &cfg, files, sp, mc)
+
+	require.NoError(t, err)
+	assert.True(t, laterSplitCalled.Load(), "pipeline should continue processing later files after a missing file is skipped")
+	assert.Equal(t, 1, result.TotalChunks)
+	assert.Equal(t, 1, result.ChunkCounts["later.go"])
+	assert.NotContains(t, result.ChunkCounts, "missing.go")
+	assert.Contains(t, buf.String(), "pipeline: skip missing file missing.go")
+}
+
+// ─── Run: unreadable file fails the run ──────────────────────────────────────
+
+func TestRun_OpenPermissionErrorStillFails(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("cannot test filesystem permission errors when running as root")
+	}
+
+	dir := t.TempDir()
+	mc := mocks.NewMockInserter(t)
+	sp := mocks.NewMockSplitter(t)
+
+	denied := makeFile(t, dir, "denied.go", "denied\n")
+	require.NoError(t, os.Chmod(denied.AbsPath, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(denied.AbsPath, 0o644) }) // restore for t.TempDir cleanup
+
+	var laterSplitCalled atomic.Bool
+
+	sp.On("Split", testifymock.Anything, "later.go", testifymock.Anything).
+		Run(func(args testifymock.Arguments) {
+			laterSplitCalled.Store(true)
+		}).
+		Return(nil).
+		Maybe()
+	mc.On("Insert", testifymock.Anything, "col", testifymock.Anything).
+		Return(&milvus.InsertResult{InsertCount: 1}, nil).
+		Maybe()
+
+	files := []walker.CodeFile{
+		denied,
+		makeFile(t, dir, "later.go", "later\n"),
+	}
+	cfg := baseConfig("col", dir)
+	cfg.Concurrency = 1
+
 	result, err := pipeline.Run(context.Background(), &cfg, files, sp, mc)
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "missing.go")
-	assert.Contains(t, err.Error(), "no such file or directory")
+	assert.Contains(t, err.Error(), "denied.go")
+	assert.Contains(t, err.Error(), "permission denied")
 	assert.False(t, laterSplitCalled.Load(), "pipeline should stop processing later files after the first open error")
 	assert.Equal(t, 0, result.TotalChunks)
 	assert.Empty(t, result.ChunkCounts)

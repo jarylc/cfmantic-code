@@ -238,6 +238,16 @@ func Run(ctx context.Context, cfg *Config, files []walker.CodeFile, sp splitter.
 				fh, err := os.Open(file.AbsPath)
 				if err != nil {
 					wrappedErr := fmt.Errorf("open %s: %w", file.RelPath, err)
+
+					// The file was deleted or moved after discovery. Skip it: the next
+					// sync classifies it as Deleted and removes its manifest entry and
+					// stale chunks.
+					if errors.Is(err, os.ErrNotExist) {
+						log.Printf("pipeline: skip missing file %s: %v", file.RelPath, err)
+
+						continue
+					}
+
 					log.Printf("pipeline: %v", wrappedErr)
 					stop(wrappedErr)
 

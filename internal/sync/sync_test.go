@@ -1359,6 +1359,68 @@ func TestSyncCodebase_WorkerReadError_FailsSync(t *testing.T) {
 	assert.Contains(t, sm.steps, "Indexing 1 changed files")
 }
 
+// ─── syncCodebase: vanished file is skipped, sync continues ──────────────────
+
+func TestSyncCodebase_WorkerFileVanishes_SyncContinues(t *testing.T) {
+	cfg := testConfig(t)
+
+	mc := mocks.NewMockVectorClient(t)
+	sm := newRecordingStatusManager()
+	sp := mocks.NewMockSplitter(t)
+	mgr := NewManager(mc, sm, sp, cfg, 300)
+
+	dir := t.TempDir()
+	goFile := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(goFile, []byte("package main"), 0o644))
+
+	// Record a stale hash so Diff reports "Modified" → file goes into filesToProcess.
+	oldHashes := NewFileHashMap()
+	oldHashes.Files["main.go"] = FileEntry{Hash: "stale-hash", ChunkCount: 2}
+	require.NoError(t, oldHashes.Save(HashFilePath(dir)))
+
+	collection := snapshot.CollectionName(dir)
+
+	sm.SetIndexed(dir, 1, 5)
+
+	// Capture the old IDs first, then delete the file before replacement indexing.
+	// No Split expectation is registered: the vanished file must never reach the splitter.
+	mc.EXPECT().Query(testifymock.Anything, collection, `relativePath == "main.go"`, 2).
+		Run(func(context.Context, string, string, int) {
+			require.NoError(t, os.Remove(goFile))
+		}).Return([]milvus.Entity{{ID: "chunk-old"}}, nil).Once()
+
+	// The skipped file contributes no new chunks, so all old chunks are removed as stale.
+	mc.EXPECT().Delete(testifymock.Anything, collection, `id in ["chunk-old"]`).Return(nil).Once()
+
+	mgr.syncCodebase(dir)
+
+	info := sm.GetInfo(dir)
+	require.NotNil(t, info)
+	assert.Equal(t, snapshot.StatusIndexed, info.Status)
+	assert.Empty(t, info.ErrorMessage)
+	assert.Contains(t, sm.steps, "Removing stale chunks")
+	assert.Contains(t, sm.steps, "Indexing 1 changed files")
+	assert.Contains(t, sm.steps, "Finalizing incremental sync")
+
+	saved, err := LoadFileHashMap(HashFilePath(dir))
+	require.NoError(t, err)
+	require.Contains(t, saved.Files, "main.go")
+	assert.Equal(t, 0, saved.Files["main.go"].ChunkCount)
+
+	// Self-heal: the next sync classifies the vanished file as Deleted and drops its manifest entry.
+	mc.EXPECT().Delete(testifymock.Anything, collection, `relativePath == "main.go"`).Return(nil).Once()
+
+	mgr.syncCodebase(dir)
+
+	saved, err = LoadFileHashMap(HashFilePath(dir))
+	require.NoError(t, err)
+	assert.Empty(t, saved.Files)
+
+	info = sm.GetInfo(dir)
+	require.NotNil(t, info)
+	assert.Equal(t, snapshot.StatusIndexed, info.Status)
+}
+
 // ─── syncCodebase: hash-file save error ───────────────────────────────────────
 
 // TestSyncCodebase_SaveHashesError_FailsSync verifies that manifest persistence
